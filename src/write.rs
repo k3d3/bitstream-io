@@ -15,23 +15,24 @@
 //! [specification](https://xiph.org/flac/format.html#stream).
 //!
 //! ```
-//! use std::io::Write;
-//! use bitstream_io::{BigEndian, BitWriter, BitWrite};
+//! use tokio::io::{AsyncWrite, AsyncWriteExt};
+//! use bitstream_io::{BigEndian, AsyncBitWriter, AsyncBitWrite};
 //!
+//! # tokio_test::block_on(async {
 //! let mut flac: Vec<u8> = Vec::new();
 //! {
-//!     let mut writer = BitWriter::endian(&mut flac, BigEndian);
+//!     let mut writer = AsyncBitWriter::endian(&mut flac, BigEndian);
 //!
 //!     // stream marker
-//!     writer.write_bytes(b"fLaC").unwrap();
+//!     writer.write_bytes(b"fLaC").await.unwrap();
 //!
 //!     // metadata block header
 //!     let last_block: bool = false;
 //!     let block_type: u8 = 0;
 //!     let block_size: u32 = 34;
-//!     writer.write_bit(last_block).unwrap();
-//!     writer.write(7, block_type).unwrap();
-//!     writer.write(24, block_size).unwrap();
+//!     writer.write_bit(last_block).await.unwrap();
+//!     writer.write(7, block_type).await.unwrap();
+//!     writer.write(24, block_size).await.unwrap();
 //!
 //!     // STREAMINFO block
 //!     let minimum_block_size: u16 = 4096;
@@ -42,14 +43,14 @@
 //!     let channels: u8 = 2;
 //!     let bits_per_sample: u8 = 16;
 //!     let total_samples: u64 = 304844;
-//!     writer.write(16, minimum_block_size).unwrap();
-//!     writer.write(16, maximum_block_size).unwrap();
-//!     writer.write(24, minimum_frame_size).unwrap();
-//!     writer.write(24, maximum_frame_size).unwrap();
-//!     writer.write(20, sample_rate).unwrap();
-//!     writer.write(3, channels - 1).unwrap();
-//!     writer.write(5, bits_per_sample - 1).unwrap();
-//!     writer.write(36, total_samples).unwrap();
+//!     writer.write(16, minimum_block_size).await.unwrap();
+//!     writer.write(16, maximum_block_size).await.unwrap();
+//!     writer.write(24, minimum_frame_size).await.unwrap();
+//!     writer.write(24, maximum_frame_size).await.unwrap();
+//!     writer.write(20, sample_rate).await.unwrap();
+//!     writer.write(3, channels - 1).await.unwrap();
+//!     writer.write(5, bits_per_sample - 1).await.unwrap();
+//!     writer.write(36, total_samples).await.unwrap();
 //! }
 //!
 //! // STREAMINFO's MD5 sum
@@ -59,6 +60,7 @@
 //!
 //! flac.write_all(
 //!     b"\xFA\xF2\x69\x2F\xFD\xEC\x2D\x5B\x30\x01\x76\xB4\x62\x88\x7D\x92")
+//!     .await
 //!     .unwrap();
 //!
 //! assert_eq!(flac, vec![0x66,0x4C,0x61,0x43,0x00,0x00,0x00,0x22,
@@ -67,6 +69,7 @@
 //!                       0xA6,0xCC,0xFA,0xF2,0x69,0x2F,0xFD,0xEC,
 //!                       0x2D,0x5B,0x30,0x01,0x76,0xB4,0x62,0x88,
 //!                       0x7D,0x92]);
+//! # });
 //! ```
 
 #![warn(missing_docs)]
@@ -74,8 +77,11 @@
 use std::convert::From;
 use std::io;
 use std::ops::{AddAssign, Rem};
+use async_trait::async_trait;
 
-use super::{huffman::WriteHuffmanTree, BitQueue, Endianness, Numeric, PhantomData, SignedNumeric};
+use tokio::io::{AsyncWrite, AsyncWriteExt};
+
+use super::{huffman::WriteHuffmanTree, BitQueue, AsyncEndianness, Numeric, PhantomData, SignedNumeric};
 
 /// For writing bit values to an underlying stream in a given endianness.
 ///
@@ -84,30 +90,30 @@ use super::{huffman::WriteHuffmanTree, BitQueue, Endianness, Numeric, PhantomDat
 /// writer's lifetime ends.
 /// **Partial bytes will be lost** if the writer is disposed of
 /// before they can be written.
-pub struct BitWriter<W: io::Write, E: Endianness> {
+pub struct AsyncBitWriter<W: AsyncWrite + Unpin + Sync + Send, E: AsyncEndianness + Sync + Send> {
     writer: W,
     bitqueue: BitQueue<E, u8>,
 }
 
-impl<W: io::Write, E: Endianness> BitWriter<W, E> {
-    /// Wraps a BitWriter around something that implements `Write`
-    pub fn new(writer: W) -> BitWriter<W, E> {
-        BitWriter {
+impl<W: AsyncWrite + Unpin + Sync + Send, E: AsyncEndianness + Sync + Send> AsyncBitWriter<W, E> {
+    /// Wraps an AsyncBitWriter around something that implements `AsyncWrite`
+    pub fn new(writer: W) -> AsyncBitWriter<W, E> {
+        AsyncBitWriter {
             writer,
             bitqueue: BitQueue::new(),
         }
     }
 
-    /// Wraps a BitWriter around something that implements `Write`
+    /// Wraps an AsyncBitWriter around something that implements `AsyncWrite`
     /// with the given endianness.
-    pub fn endian(writer: W, _endian: E) -> BitWriter<W, E> {
-        BitWriter {
+    pub fn endian(writer: W, _endian: E) -> AsyncBitWriter<W, E> {
+        AsyncBitWriter {
             writer,
             bitqueue: BitQueue::new(),
         }
     }
 
-    /// Unwraps internal writer and disposes of BitWriter.
+    /// Unwraps internal writer and disposes of AsyncBitWriter.
     ///
     /// # Warning
     ///
@@ -134,8 +140,8 @@ impl<W: io::Write, E: Endianness> BitWriter<W, E> {
     ///
     /// Any written partial bits are discarded.
     #[inline]
-    pub fn into_bytewriter(self) -> ByteWriter<W, E> {
-        ByteWriter::new(self.into_writer())
+    pub fn into_bytewriter(self) -> AsyncByteWriter<W, E> {
+        AsyncByteWriter::new(self.into_writer())
     }
 
     /// If stream is byte-aligned, provides temporary `ByteWriter`
@@ -145,8 +151,8 @@ impl<W: io::Write, E: Endianness> BitWriter<W, E> {
     ///
     /// Any unwritten bits left over when `ByteWriter` is dropped are lost.
     #[inline]
-    pub fn bytewriter(&mut self) -> Option<ByteWriter<&mut W, E>> {
-        self.writer().map(ByteWriter::new)
+    pub fn bytewriter(&mut self) -> Option<AsyncByteWriter<&mut W, E>> {
+        self.writer().map(AsyncByteWriter::new)
     }
 
     /// Consumes writer and returns any un-written partial byte
@@ -154,31 +160,35 @@ impl<W: io::Write, E: Endianness> BitWriter<W, E> {
     ///
     /// # Examples
     /// ```
-    /// use std::io::Write;
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite};
+    /// use tokio::io::AsyncWrite;
+    /// use bitstream_io::{BigEndian, AsyncBitWriter, AsyncBitWrite};
+    /// # tokio_test::block_on(async {
     /// let mut data = Vec::new();
     /// let (bits, value) = {
-    ///     let mut writer = BitWriter::endian(&mut data, BigEndian);
-    ///     writer.write(15, 0b1010_0101_0101_101).unwrap();
+    ///     let mut writer = AsyncBitWriter::endian(&mut data, BigEndian);
+    ///     writer.write(15, 0b1010_0101_0101_101).await.unwrap();
     ///     writer.into_unwritten()
     /// };
     /// assert_eq!(data, [0b1010_0101]);
     /// assert_eq!(bits, 7);
     /// assert_eq!(value, 0b0101_101);
+    /// # });
     /// ```
     ///
     /// ```
-    /// use std::io::Write;
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite};
+    /// use tokio::io::AsyncWrite;
+    /// use bitstream_io::{BigEndian, AsyncBitWriter, AsyncBitWrite};
+    /// # tokio_test::block_on(async {
     /// let mut data = Vec::new();
     /// let (bits, value) = {
-    ///     let mut writer = BitWriter::endian(&mut data, BigEndian);
-    ///     writer.write(8, 0b1010_0101).unwrap();
+    ///     let mut writer = AsyncBitWriter::endian(&mut data, BigEndian);
+    ///     writer.write(8, 0b1010_0101).await.unwrap();
     ///     writer.into_unwritten()
     /// };
     /// assert_eq!(data, [0b1010_0101]);
     /// assert_eq!(bits, 0);
     /// assert_eq!(value, 0);
+    /// # });
     /// ```
     #[inline(always)]
     pub fn into_unwritten(self) -> (u32, u8) {
@@ -192,21 +202,22 @@ impl<W: io::Write, E: Endianness> BitWriter<W, E> {
     ///
     /// Passes along any errors from the underlying stream.
     #[inline(always)]
-    pub fn flush(&mut self) -> io::Result<()> {
-        self.writer.flush()
+    pub async fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush().await
     }
 }
 
 /// A trait for anything that can write a variable number of
 /// potentially un-aligned values to an output stream
-pub trait BitWrite {
+#[async_trait]
+pub trait AsyncBitWrite: Sync + Send {
     /// Writes a single bit to the stream.
     /// `true` indicates 1, `false` indicates 0
     ///
     /// # Errors
     ///
     /// Passes along any I/O error from the underlying stream.
-    fn write_bit(&mut self, bit: bool) -> io::Result<()>;
+    async fn write_bit(&mut self, bit: bool) -> io::Result<()>;
 
     /// Writes an unsigned value to the stream using the given
     /// number of bits.
@@ -218,9 +229,9 @@ pub trait BitWrite {
     /// to hold the given number of bits.
     /// Returns an error if the value is too large
     /// to fit the given number of bits.
-    fn write<U>(&mut self, bits: u32, value: U) -> io::Result<()>
+    async fn write<U>(&mut self, bits: u32, value: U) -> io::Result<()>
     where
-        U: Numeric;
+        U: Numeric + Sync + Send;
 
     /// Writes a twos-complement signed value to the stream
     /// with the given number of bits.
@@ -232,9 +243,9 @@ pub trait BitWrite {
     /// to hold the given number of bits.
     /// Returns an error if the value is too large
     /// to fit the given number of bits.
-    fn write_signed<S>(&mut self, bits: u32, value: S) -> io::Result<()>
+    async fn write_signed<S>(&mut self, bits: u32, value: S) -> io::Result<()>
     where
-        S: SignedNumeric;
+        S: SignedNumeric + Sync + Send;
 
     /// Writes the entirety of a byte buffer to the stream.
     ///
@@ -245,18 +256,24 @@ pub trait BitWrite {
     /// # Example
     ///
     /// ```
-    /// use std::io::Write;
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite};
-    /// let mut writer = BitWriter::endian(Vec::new(), BigEndian);
-    /// writer.write(8, 0x66).unwrap();
-    /// writer.write(8, 0x6F).unwrap();
-    /// writer.write(8, 0x6F).unwrap();
-    /// writer.write_bytes(b"bar").unwrap();
+    /// use tokio::io::AsyncWrite;
+    /// use bitstream_io::{BigEndian, AsyncBitWriter, AsyncBitWrite};
+    /// # tokio_test::block_on(async {
+    /// let mut writer = AsyncBitWriter::endian(Vec::new(), BigEndian);
+    /// writer.write(8, 0x66).await.unwrap();
+    /// writer.write(8, 0x6F).await.unwrap();
+    /// writer.write(8, 0x6F).await.unwrap();
+    /// writer.write_bytes(b"bar").await.unwrap();
     /// assert_eq!(writer.into_writer(), b"foobar");
+    /// # });
     /// ```
     #[inline]
-    fn write_bytes(&mut self, buf: &[u8]) -> io::Result<()> {
-        buf.iter().try_for_each(|b| self.write(8, *b))
+    async fn write_bytes(&mut self, buf: &[u8]) -> io::Result<()> {
+        for b in buf.iter() {
+            self.write(8, *b).await?;
+        }
+
+        Ok(())
     }
 
     /// Writes `value` number of 1 bits to the stream
@@ -268,45 +285,53 @@ pub trait BitWrite {
     ///
     /// # Examples
     /// ```
-    /// use std::io::Write;
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite};
-    /// let mut writer = BitWriter::endian(Vec::new(), BigEndian);
-    /// writer.write_unary0(0).unwrap();
-    /// writer.write_unary0(3).unwrap();
-    /// writer.write_unary0(10).unwrap();
+    /// use tokio::io::AsyncWrite;
+    /// use bitstream_io::{BigEndian, AsyncBitWriter, AsyncBitWrite};
+    /// # tokio_test::block_on(async {
+    /// let mut writer = AsyncBitWriter::endian(Vec::new(), BigEndian);
+    /// writer.write_unary0(0).await.unwrap();
+    /// writer.write_unary0(3).await.unwrap();
+    /// writer.write_unary0(10).await.unwrap();
     /// assert_eq!(writer.into_writer(), [0b01110111, 0b11111110]);
+    /// # });
     /// ```
     ///
     /// ```
-    /// use std::io::Write;
-    /// use bitstream_io::{LittleEndian, BitWriter, BitWrite};
-    /// let mut writer = BitWriter::endian(Vec::new(), LittleEndian);
-    /// writer.write_unary0(0).unwrap();
-    /// writer.write_unary0(3).unwrap();
-    /// writer.write_unary0(10).unwrap();
+    /// use tokio::io::AsyncWrite;
+    /// use bitstream_io::{LittleEndian, AsyncBitWriter, AsyncBitWrite};
+    /// # tokio_test::block_on(async {
+    /// let mut writer = AsyncBitWriter::endian(Vec::new(), LittleEndian);
+    /// writer.write_unary0(0).await.unwrap();
+    /// writer.write_unary0(3).await.unwrap();
+    /// writer.write_unary0(10).await.unwrap();
     /// assert_eq!(writer.into_writer(), [0b11101110, 0b01111111]);
+    /// # });
     /// ```
-    fn write_unary0(&mut self, value: u32) -> io::Result<()> {
+    async fn write_unary0(&mut self, value: u32) -> io::Result<()> {
         match value {
-            0 => self.write_bit(false),
-            bits @ 1..=31 => self
-                .write(value, (1u32 << bits) - 1)
-                .and_then(|()| self.write_bit(false)),
-            32 => self
-                .write(value, 0xFFFF_FFFFu32)
-                .and_then(|()| self.write_bit(false)),
-            bits @ 33..=63 => self
-                .write(value, (1u64 << bits) - 1)
-                .and_then(|()| self.write_bit(false)),
-            64 => self
-                .write(value, 0xFFFF_FFFF_FFFF_FFFFu64)
-                .and_then(|()| self.write_bit(false)),
+            0 => self.write_bit(false).await,
+            bits @ 1..=31 => {
+                self.write(value, (1u32 << bits) - 1).await?;
+                self.write_bit(false).await
+            }
+            32 => {
+                self.write(value, 0xFFFF_FFFFu32).await?;
+                self.write_bit(false).await
+            }
+            bits @ 33..=63 => {
+                self.write(value, (1u64 << bits) - 1).await?;
+                self.write_bit(false).await
+            }
+            64 => {
+                self.write(value, 0xFFFF_FFFF_FFFF_FFFFu64).await?;
+                self.write_bit(false).await
+            }
             mut bits => {
                 while bits > 64 {
-                    self.write(64, 0xFFFF_FFFF_FFFF_FFFFu64)?;
+                    self.write(64, 0xFFFF_FFFF_FFFF_FFFFu64).await?;
                     bits -= 64;
                 }
-                self.write_unary0(bits)
+                self.write_unary0(bits).await
             }
         }
     }
@@ -320,35 +345,45 @@ pub trait BitWrite {
     ///
     /// # Example
     /// ```
-    /// use std::io::Write;
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite};
-    /// let mut writer = BitWriter::endian(Vec::new(), BigEndian);
-    /// writer.write_unary1(0).unwrap();
-    /// writer.write_unary1(3).unwrap();
-    /// writer.write_unary1(10).unwrap();
+    /// use tokio::io::AsyncWrite;
+    /// use bitstream_io::{BigEndian, AsyncBitWriter, AsyncBitWrite};
+    /// # tokio_test::block_on(async {
+    /// let mut writer = AsyncBitWriter::endian(Vec::new(), BigEndian);
+    /// writer.write_unary1(0).await.unwrap();
+    /// writer.write_unary1(3).await.unwrap();
+    /// writer.write_unary1(10).await.unwrap();
     /// assert_eq!(writer.into_writer(), [0b10001000, 0b00000001]);
+    /// # });
     /// ```
     ///
     /// ```
-    /// use std::io::Write;
-    /// use bitstream_io::{LittleEndian, BitWriter, BitWrite};
-    /// let mut writer = BitWriter::endian(Vec::new(), LittleEndian);
-    /// writer.write_unary1(0).unwrap();
-    /// writer.write_unary1(3).unwrap();
-    /// writer.write_unary1(10).unwrap();
+    /// use tokio::io::AsyncWrite;
+    /// use bitstream_io::{LittleEndian, AsyncBitWriter, AsyncBitWrite};
+    /// # tokio_test::block_on(async {
+    /// let mut writer = AsyncBitWriter::endian(Vec::new(), LittleEndian);
+    /// writer.write_unary1(0).await.unwrap();
+    /// writer.write_unary1(3).await.unwrap();
+    /// writer.write_unary1(10).await.unwrap();
     /// assert_eq!(writer.into_writer(), [0b00010001, 0b10000000]);
+    /// # });
     /// ```
-    fn write_unary1(&mut self, value: u32) -> io::Result<()> {
+    async fn write_unary1(&mut self, value: u32) -> io::Result<()> {
         match value {
-            0 => self.write_bit(true),
-            1..=32 => self.write(value, 0u32).and_then(|()| self.write_bit(true)),
-            33..=64 => self.write(value, 0u64).and_then(|()| self.write_bit(true)),
+            0 => self.write_bit(true).await,
+            1..=32 => {
+                self.write(value, 0u32).await?;
+                self.write_bit(true).await
+            }
+            33..=64 => {
+                self.write(value, 0u64).await?;
+                self.write_bit(true).await
+            }
             mut bits => {
                 while bits > 64 {
-                    self.write(64, 0u64)?;
+                    self.write(64, 0u64).await?;
                     bits -= 64;
                 }
-                self.write_unary1(bits)
+                self.write_unary1(bits).await
             }
         }
     }
@@ -365,17 +400,19 @@ pub trait BitWrite {
     ///
     /// # Example
     /// ```
-    /// use std::io::Write;
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite};
-    /// let mut writer = BitWriter::endian(Vec::new(), BigEndian);
-    /// writer.write(1, 0).unwrap();
-    /// writer.byte_align().unwrap();
-    /// writer.write(8, 0xFF).unwrap();
+    /// use tokio::io::AsyncWrite;
+    /// use bitstream_io::{BigEndian, AsyncBitWriter, AsyncBitWrite};
+    /// # tokio_test::block_on(async {
+    /// let mut writer = AsyncBitWriter::endian(Vec::new(), BigEndian);
+    /// writer.write(1, 0).await.unwrap();
+    /// writer.byte_align().await.unwrap();
+    /// writer.write(8, 0xFF).await.unwrap();
     /// assert_eq!(writer.into_writer(), [0x00, 0xFF]);
+    /// # });
     /// ```
-    fn byte_align(&mut self) -> io::Result<()> {
+    async fn byte_align(&mut self) -> io::Result<()> {
         while !self.byte_aligned() {
-            self.write_bit(false)?;
+            self.write_bit(false).await?;
         }
         Ok(())
     }
@@ -383,52 +420,58 @@ pub trait BitWrite {
 
 /// A trait for anything that can write Huffman codes
 /// of a given endianness to an output stream
-pub trait HuffmanWrite<E: Endianness> {
+#[async_trait]
+pub trait AsyncHuffmanWrite<E: AsyncEndianness> {
     /// Writes Huffman code for the given symbol to the stream.
     ///
     /// # Errors
     ///
     /// Passes along any I/O error from the underlying stream.
-    fn write_huffman<T>(&mut self, tree: &WriteHuffmanTree<E, T>, symbol: T) -> io::Result<()>
+    async fn write_huffman<T>(&mut self, tree: &WriteHuffmanTree<E, T>, symbol: T) -> io::Result<()>
     where
-        T: Ord + Copy;
+        T: Ord + Copy + Sync + Send;
 }
 
-impl<W: io::Write, E: Endianness> BitWrite for BitWriter<W, E> {
+#[async_trait]
+impl<W: AsyncWrite + Unpin + Sync + Send, E: AsyncEndianness + Sync + Send> AsyncBitWrite for AsyncBitWriter<W, E> {
     /// # Examples
     /// ```
-    /// use std::io::Write;
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite};
-    /// let mut writer = BitWriter::endian(Vec::new(), BigEndian);
-    /// writer.write_bit(true).unwrap();
-    /// writer.write_bit(false).unwrap();
-    /// writer.write_bit(true).unwrap();
-    /// writer.write_bit(true).unwrap();
-    /// writer.write_bit(false).unwrap();
-    /// writer.write_bit(true).unwrap();
-    /// writer.write_bit(true).unwrap();
-    /// writer.write_bit(true).unwrap();
+    /// use tokio::io::AsyncWrite;
+    /// use bitstream_io::{BigEndian, AsyncBitWriter, AsyncBitWrite};
+    /// # tokio_test::block_on(async {
+    /// let mut writer = AsyncBitWriter::endian(Vec::new(), BigEndian);
+    /// writer.write_bit(true).await.unwrap();
+    /// writer.write_bit(false).await.unwrap();
+    /// writer.write_bit(true).await.unwrap();
+    /// writer.write_bit(true).await.unwrap();
+    /// writer.write_bit(false).await.unwrap();
+    /// writer.write_bit(true).await.unwrap();
+    /// writer.write_bit(true).await.unwrap();
+    /// writer.write_bit(true).await.unwrap();
     /// assert_eq!(writer.into_writer(), [0b10110111]);
+    /// # });
     /// ```
     ///
     /// ```
-    /// use std::io::Write;
-    /// use bitstream_io::{LittleEndian, BitWriter, BitWrite};
-    /// let mut writer = BitWriter::endian(Vec::new(), LittleEndian);
-    /// writer.write_bit(true).unwrap();
-    /// writer.write_bit(true).unwrap();
-    /// writer.write_bit(true).unwrap();
-    /// writer.write_bit(false).unwrap();
-    /// writer.write_bit(true).unwrap();
-    /// writer.write_bit(true).unwrap();
-    /// writer.write_bit(false).unwrap();
-    /// writer.write_bit(true).unwrap();
+    /// use tokio::io::AsyncWrite;
+    /// use bitstream_io::{LittleEndian, AsyncBitWriter, AsyncBitWrite};
+    /// # tokio_test::block_on(async {
+    /// let mut writer = AsyncBitWriter::endian(Vec::new(), LittleEndian);
+    /// writer.write_bit(true).await.unwrap();
+    /// writer.write_bit(true).await.unwrap();
+    /// writer.write_bit(true).await.unwrap();
+    /// writer.write_bit(false).await.unwrap();
+    /// writer.write_bit(true).await.unwrap();
+    /// writer.write_bit(true).await.unwrap();
+    /// writer.write_bit(false).await.unwrap();
+    /// writer.write_bit(true).await.unwrap();
     /// assert_eq!(writer.into_writer(), [0b10110111]);
+    /// # });
     /// ```
-    fn write_bit(&mut self, bit: bool) -> io::Result<()> {
+    async fn write_bit(&mut self, bit: bool) -> io::Result<()> {
         self.bitqueue.push(1, if bit { 1 } else { 0 });
         if self.bitqueue.is_full() {
-            write_byte(&mut self.writer, self.bitqueue.pop(8))
+            write_byte(&mut self.writer, self.bitqueue.pop(8)).await
         } else {
             Ok(())
         }
@@ -436,41 +479,47 @@ impl<W: io::Write, E: Endianness> BitWrite for BitWriter<W, E> {
 
     /// # Examples
     /// ```
-    /// use std::io::Write;
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite};
-    /// let mut writer = BitWriter::endian(Vec::new(), BigEndian);
-    /// writer.write(1, 0b1).unwrap();
-    /// writer.write(2, 0b01).unwrap();
-    /// writer.write(5, 0b10111).unwrap();
+    /// use tokio::io::AsyncWrite;
+    /// use bitstream_io::{BigEndian, AsyncBitWriter, AsyncBitWrite};
+    /// # tokio_test::block_on(async {
+    /// let mut writer = AsyncBitWriter::endian(Vec::new(), BigEndian);
+    /// writer.write(1, 0b1).await.unwrap();
+    /// writer.write(2, 0b01).await.unwrap();
+    /// writer.write(5, 0b10111).await.unwrap();
     /// assert_eq!(writer.into_writer(), [0b10110111]);
+    /// # });
     /// ```
     ///
     /// ```
-    /// use std::io::Write;
-    /// use bitstream_io::{LittleEndian, BitWriter, BitWrite};
-    /// let mut writer = BitWriter::endian(Vec::new(), LittleEndian);
-    /// writer.write(1, 0b1).unwrap();
-    /// writer.write(2, 0b11).unwrap();
-    /// writer.write(5, 0b10110).unwrap();
+    /// use tokio::io::AsyncWrite;
+    /// use bitstream_io::{LittleEndian, AsyncBitWriter, AsyncBitWrite};
+    /// # tokio_test::block_on(async {
+    /// let mut writer = AsyncBitWriter::endian(Vec::new(), LittleEndian);
+    /// writer.write(1, 0b1).await.unwrap();
+    /// writer.write(2, 0b11).await.unwrap();
+    /// writer.write(5, 0b10110).await.unwrap();
     /// assert_eq!(writer.into_writer(), [0b10110111]);
+    /// # });
     /// ```
     ///
     /// ```
-    /// use std::io::{Write, sink};
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite};
-    /// let mut w = BitWriter::endian(sink(), BigEndian);
-    /// assert!(w.write(9, 0u8).is_err());    // can't write  u8 in 9 bits
-    /// assert!(w.write(17, 0u16).is_err());  // can't write u16 in 17 bits
-    /// assert!(w.write(33, 0u32).is_err());  // can't write u32 in 33 bits
-    /// assert!(w.write(65, 0u64).is_err());  // can't write u64 in 65 bits
-    /// assert!(w.write(1, 2).is_err());      // can't write   2 in 1 bit
-    /// assert!(w.write(2, 4).is_err());      // can't write   4 in 2 bits
-    /// assert!(w.write(3, 8).is_err());      // can't write   8 in 3 bits
-    /// assert!(w.write(4, 16).is_err());     // can't write  16 in 4 bits
+    /// use tokio::io::{AsyncWrite, sink};
+    /// use bitstream_io::{BigEndian, AsyncBitWriter, AsyncBitWrite};
+    /// # tokio_test::block_on(async {
+    /// let mut w = AsyncBitWriter::endian(sink(), BigEndian);
+    /// assert!(w.write(9, 0u8).await.is_err());    // can't write  u8 in 9 bits
+    /// assert!(w.write(17, 0u16).await.is_err());  // can't write u16 in 17 bits
+    /// assert!(w.write(33, 0u32).await.is_err());  // can't write u32 in 33 bits
+    /// assert!(w.write(65, 0u64).await.is_err());  // can't write u64 in 65 bits
+    /// assert!(w.write(1, 2).await.is_err());      // can't write   2 in 1 bit
+    /// assert!(w.write(2, 4).await.is_err());      // can't write   4 in 2 bits
+    /// assert!(w.write(3, 8).await.is_err());      // can't write   8 in 3 bits
+    /// assert!(w.write(4, 16).await.is_err());     // can't write  16 in 4 bits
+    /// # });
     /// ```
-    fn write<U>(&mut self, bits: u32, value: U) -> io::Result<()>
+    async fn write<U>(&mut self, bits: u32, value: U) -> io::Result<()>
     where
-        U: Numeric,
+        U: Numeric + Sync + Send,
     {
         if bits > U::bits_size() {
             Err(io::Error::new(
@@ -487,8 +536,8 @@ impl<W: io::Write, E: Endianness> BitWrite for BitWriter<W, E> {
             Ok(())
         } else {
             let mut acc = BitQueue::from_value(value, bits);
-            write_unaligned(&mut self.writer, &mut acc, &mut self.bitqueue)?;
-            write_aligned(&mut self.writer, &mut acc)?;
+            write_unaligned(&mut self.writer, &mut acc, &mut self.bitqueue).await?;
+            write_aligned(&mut self.writer, &mut acc).await?;
             self.bitqueue.push(acc.len(), acc.value().to_u8());
             Ok(())
         }
@@ -496,49 +545,59 @@ impl<W: io::Write, E: Endianness> BitWrite for BitWriter<W, E> {
 
     /// # Examples
     /// ```
-    /// use std::io::Write;
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite};
-    /// let mut writer = BitWriter::endian(Vec::new(), BigEndian);
-    /// writer.write_signed(4, -5).unwrap();
-    /// writer.write_signed(4, 7).unwrap();
+    /// use tokio::io::AsyncWrite;
+    /// use bitstream_io::{BigEndian, AsyncBitWriter, AsyncBitWrite};
+    /// # tokio_test::block_on(async {
+    /// let mut writer = AsyncBitWriter::endian(Vec::new(), BigEndian);
+    /// writer.write_signed(4, -5).await.unwrap();
+    /// writer.write_signed(4, 7).await.unwrap();
     /// assert_eq!(writer.into_writer(), [0b10110111]);
+    /// # });
     /// ```
     ///
     /// ```
-    /// use std::io::Write;
-    /// use bitstream_io::{LittleEndian, BitWriter, BitWrite};
-    /// let mut writer = BitWriter::endian(Vec::new(), LittleEndian);
-    /// writer.write_signed(4, 7).unwrap();
-    /// writer.write_signed(4, -5).unwrap();
+    /// use tokio::io::AsyncWrite;
+    /// use bitstream_io::{LittleEndian, AsyncBitWriter, AsyncBitWrite};
+    /// # tokio_test::block_on(async {
+    /// let mut writer = AsyncBitWriter::endian(Vec::new(), LittleEndian);
+    /// writer.write_signed(4, 7).await.unwrap();
+    /// writer.write_signed(4, -5).await.unwrap();
     /// assert_eq!(writer.into_writer(), [0b10110111]);
+    /// # });
     /// ```
     #[inline]
-    fn write_signed<S>(&mut self, bits: u32, value: S) -> io::Result<()>
+    async fn write_signed<S>(&mut self, bits: u32, value: S) -> io::Result<()>
     where
-        S: SignedNumeric,
+        S: SignedNumeric + Sync + Send,
     {
-        E::write_signed(self, bits, value)
+        E::write_signed(self, bits, value).await
     }
 
     #[inline]
-    fn write_bytes(&mut self, buf: &[u8]) -> io::Result<()> {
+    async fn write_bytes(&mut self, buf: &[u8]) -> io::Result<()> {
         if self.byte_aligned() {
-            self.writer.write_all(buf)
+            self.writer.write_all(buf).await
         } else {
-            buf.iter().try_for_each(|b| self.write(8, *b))
+            for b in buf.iter() {
+                self.write(8, *b).await?
+            }
+
+            Ok(())
         }
     }
 
     /// # Example
     /// ```
-    /// use std::io::{Write, sink};
-    /// use bitstream_io::{BigEndian, BitWriter, BitWrite};
-    /// let mut writer = BitWriter::endian(sink(), BigEndian);
+    /// use tokio::io::{AsyncWrite, sink};
+    /// use bitstream_io::{BigEndian, AsyncBitWriter, AsyncBitWrite};
+    /// # tokio_test::block_on(async {
+    /// let mut writer = AsyncBitWriter::endian(sink(), BigEndian);
     /// assert_eq!(writer.byte_aligned(), true);
-    /// writer.write(1, 0).unwrap();
+    /// writer.write(1, 0).await.unwrap();
     /// assert_eq!(writer.byte_aligned(), false);
-    /// writer.write(7, 0).unwrap();
+    /// writer.write(7, 0).await.unwrap();
     /// assert_eq!(writer.byte_aligned(), true);
+    /// # });
     /// ```
     #[inline(always)]
     fn byte_aligned(&self) -> bool {
@@ -546,30 +605,36 @@ impl<W: io::Write, E: Endianness> BitWrite for BitWriter<W, E> {
     }
 }
 
-impl<W: io::Write, E: Endianness> HuffmanWrite<E> for BitWriter<W, E> {
+#[async_trait]
+impl<W: AsyncWrite + Unpin + Sync + Send, E: AsyncEndianness + Sync + Send> AsyncHuffmanWrite<E> for AsyncBitWriter<W, E> {
     /// # Example
     /// ```
-    /// use std::io::Write;
-    /// use bitstream_io::{BigEndian, BitWriter, HuffmanWrite};
+    /// use tokio::io::AsyncWrite;
+    /// use bitstream_io::{BigEndian, AsyncBitWriter, AsyncHuffmanWrite};
     /// use bitstream_io::huffman::compile_write_tree;
     /// let tree = compile_write_tree(
     ///     vec![('a', vec![0]),
     ///          ('b', vec![1, 0]),
     ///          ('c', vec![1, 1, 0]),
     ///          ('d', vec![1, 1, 1])]).unwrap();
-    /// let mut writer = BitWriter::endian(Vec::new(), BigEndian);
-    /// writer.write_huffman(&tree, 'b').unwrap();
-    /// writer.write_huffman(&tree, 'c').unwrap();
-    /// writer.write_huffman(&tree, 'd').unwrap();
+    /// # tokio_test::block_on(async {
+    /// let mut writer = AsyncBitWriter::endian(Vec::new(), BigEndian);
+    /// writer.write_huffman(&tree, 'b').await.unwrap();
+    /// writer.write_huffman(&tree, 'c').await.unwrap();
+    /// writer.write_huffman(&tree, 'd').await.unwrap();
     /// assert_eq!(writer.into_writer(), [0b10110111]);
+    /// # });
     /// ```
     #[inline]
-    fn write_huffman<T>(&mut self, tree: &WriteHuffmanTree<E, T>, symbol: T) -> io::Result<()>
+    async fn write_huffman<T>(&mut self, tree: &WriteHuffmanTree<E, T>, symbol: T) -> io::Result<()>
     where
-        T: Ord + Copy,
+        T: Ord + Copy + Sync + Send,
     {
-        tree.get(&symbol)
-            .try_for_each(|(bits, value)| self.write(*bits, *value))
+        for (bits, value) in tree.get(&symbol) {
+            self.write(*bits, *value).await?
+        }
+
+        Ok(())
     }
 }
 
@@ -577,20 +642,22 @@ impl<W: io::Write, E: Endianness> HuffmanWrite<E> for BitWriter<W, E> {
 ///
 /// # Example
 /// ```
-/// use bitstream_io::{BigEndian, BitWrite, BitCounter};
+/// use bitstream_io::{BigEndian, AsyncBitWrite, BitCounter};
 /// let mut writer: BitCounter<u32, BigEndian> = BitCounter::new();
-/// writer.write(1, 0b1).unwrap();
-/// writer.write(2, 0b01).unwrap();
-/// writer.write(5, 0b10111).unwrap();
+/// # tokio_test::block_on(async {
+/// writer.write(1, 0b1).await.unwrap();
+/// writer.write(2, 0b01).await.unwrap();
+/// writer.write(5, 0b10111).await.unwrap();
 /// assert_eq!(writer.written(), 8);
+/// # });
 /// ```
 #[derive(Default)]
-pub struct BitCounter<N, E: Endianness> {
+pub struct BitCounter<N, E: AsyncEndianness> {
     bits: N,
     phantom: PhantomData<E>,
 }
 
-impl<N: Default + Copy, E: Endianness> BitCounter<N, E> {
+impl<N: Default + Copy, E: AsyncEndianness> BitCounter<N, E> {
     /// Creates new counter
     #[inline]
     pub fn new() -> Self {
@@ -607,21 +674,22 @@ impl<N: Default + Copy, E: Endianness> BitCounter<N, E> {
     }
 }
 
-impl<N, E> BitWrite for BitCounter<N, E>
+#[async_trait]
+impl<N, E> AsyncBitWrite for BitCounter<N, E>
 where
-    E: Endianness,
-    N: Copy + AddAssign + From<u32> + Rem<Output = N> + PartialEq,
+    E: AsyncEndianness + Sync + Send,
+    N: Copy + AddAssign + From<u32> + Rem<Output = N> + PartialEq + Sync + Send,
 {
     #[inline]
-    fn write_bit(&mut self, _bit: bool) -> io::Result<()> {
+    async fn write_bit(&mut self, _bit: bool) -> io::Result<()> {
         self.bits += 1.into();
         Ok(())
     }
 
     #[inline]
-    fn write<U>(&mut self, bits: u32, value: U) -> io::Result<()>
+    async fn write<U>(&mut self, bits: u32, value: U) -> io::Result<()>
     where
-        U: Numeric,
+        U: Numeric + Sync + Send,
     {
         if bits > U::bits_size() {
             Err(io::Error::new(
@@ -640,27 +708,27 @@ where
     }
 
     #[inline]
-    fn write_signed<S>(&mut self, bits: u32, value: S) -> io::Result<()>
+    async fn write_signed<S>(&mut self, bits: u32, value: S) -> io::Result<()>
     where
-        S: SignedNumeric,
+        S: SignedNumeric + Sync + Send,
     {
-        E::write_signed(self, bits, value)
+        E::write_signed(self, bits, value).await
     }
 
     #[inline]
-    fn write_unary1(&mut self, value: u32) -> io::Result<()> {
+    async fn write_unary1(&mut self, value: u32) -> io::Result<()> {
         self.bits += (value + 1).into();
         Ok(())
     }
 
     #[inline]
-    fn write_unary0(&mut self, value: u32) -> io::Result<()> {
+    async fn write_unary0(&mut self, value: u32) -> io::Result<()> {
         self.bits += (value + 1).into();
         Ok(())
     }
 
     #[inline]
-    fn write_bytes(&mut self, buf: &[u8]) -> io::Result<()> {
+    async fn write_bytes(&mut self, buf: &[u8]) -> io::Result<()> {
         self.bits += (buf.len() as u32 * 8).into();
         Ok(())
     }
@@ -671,14 +739,15 @@ where
     }
 }
 
-impl<N, E> HuffmanWrite<E> for BitCounter<N, E>
+#[async_trait]
+impl<N, E> AsyncHuffmanWrite<E> for BitCounter<N, E>
 where
-    E: Endianness,
-    N: AddAssign + From<u32>,
+    E: AsyncEndianness + Sync + Send,
+    N: AddAssign + From<u32> + Sync + Send,
 {
-    fn write_huffman<T>(&mut self, tree: &WriteHuffmanTree<E, T>, symbol: T) -> io::Result<()>
+    async fn write_huffman<T>(&mut self, tree: &WriteHuffmanTree<E, T>, symbol: T) -> io::Result<()>
     where
-        T: Ord + Copy,
+        T: Ord + Copy + Sync + Send,
     {
         for &(bits, _) in tree.get(&symbol) {
             let bits: N = bits.into();
@@ -762,7 +831,7 @@ enum WriteRecord {
 }
 
 impl WriteRecord {
-    fn playback<W: BitWrite>(&self, writer: &mut W) -> io::Result<()> {
+    async fn playback<W: AsyncBitWrite>(&self, writer: &mut W) -> io::Result<()> {
         match self {
             WriteRecord::Bit(v) => writer.write_bit(*v),
             WriteRecord::Unsigned {
@@ -793,31 +862,33 @@ impl WriteRecord {
             WriteRecord::Unary0(v) => writer.write_unary0(*v),
             WriteRecord::Unary1(v) => writer.write_unary1(*v),
             WriteRecord::Bytes(bytes) => writer.write_bytes(bytes),
-        }
+        }.await
     }
 }
 
 /// For recording writes in order to play them back on another writer
 /// # Example
 /// ```
-/// use std::io::Write;
-/// use bitstream_io::{BigEndian, BitWriter, BitWrite, BitRecorder};
+/// use tokio::io::AsyncWrite;
+/// use bitstream_io::{BigEndian, AsyncBitWriter, AsyncBitWrite, BitRecorder};
+/// # tokio_test::block_on(async {
 /// let mut recorder: BitRecorder<u32, BigEndian> = BitRecorder::new();
-/// recorder.write(1, 0b1).unwrap();
-/// recorder.write(2, 0b01).unwrap();
-/// recorder.write(5, 0b10111).unwrap();
+/// recorder.write(1, 0b1u64).await.unwrap();
+/// recorder.write(2, 0b01u64).await.unwrap();
+/// recorder.write(5, 0b10111u64).await.unwrap();
 /// assert_eq!(recorder.written(), 8);
-/// let mut writer = BitWriter::endian(Vec::new(), BigEndian);
-/// recorder.playback(&mut writer);
+/// let mut writer = AsyncBitWriter::endian(Vec::new(), BigEndian);
+/// recorder.playback(&mut writer).await;
 /// assert_eq!(writer.into_writer(), [0b10110111]);
+/// });
 /// ```
 #[derive(Default)]
-pub struct BitRecorder<N, E: Endianness> {
+pub struct BitRecorder<N, E: AsyncEndianness> {
     counter: BitCounter<N, E>,
     records: Vec<WriteRecord>,
 }
 
-impl<N: Default + Copy, E: Endianness> BitRecorder<N, E> {
+impl<N: Default + Copy, E: AsyncEndianness> BitRecorder<N, E> {
     /// Creates new recorder
     #[inline]
     pub fn new() -> Self {
@@ -853,30 +924,32 @@ impl<N: Default + Copy, E: Endianness> BitRecorder<N, E> {
 
     /// Plays recorded writes to the given writer
     #[inline]
-    pub fn playback<W: BitWrite>(&self, writer: &mut W) -> io::Result<()> {
-        self.records
-            .iter()
-            .try_for_each(|record| record.playback(writer))
+    pub async fn playback<W: AsyncBitWrite>(&self, writer: &mut W) -> io::Result<()> {
+        for record in self.records.iter() {
+            record.playback(writer).await?
+        }
+        Ok(())
     }
 }
 
-impl<N, E> BitWrite for BitRecorder<N, E>
+#[async_trait]
+impl<N, E> AsyncBitWrite for BitRecorder<N, E>
 where
-    E: Endianness,
-    N: Copy + From<u32> + AddAssign + Rem<Output = N> + Eq,
+    E: AsyncEndianness + Sync + Send,
+    N: Copy + From<u32> + AddAssign + Rem<Output = N> + Eq + Sync + Send,
 {
     #[inline]
-    fn write_bit(&mut self, bit: bool) -> io::Result<()> {
+    async fn write_bit(&mut self, bit: bool) -> io::Result<()> {
         self.records.push(WriteRecord::Bit(bit));
-        self.counter.write_bit(bit)
+        self.counter.write_bit(bit).await
     }
 
     #[inline]
-    fn write<U>(&mut self, bits: u32, value: U) -> io::Result<()>
+    async fn write<U>(&mut self, bits: u32, value: U) -> io::Result<()>
     where
         U: Numeric,
     {
-        self.counter.write(bits, value)?;
+        self.counter.write(bits, value).await?;
         self.records.push(WriteRecord::Unsigned {
             bits,
             value: value.unsigned_value(),
@@ -885,11 +958,11 @@ where
     }
 
     #[inline]
-    fn write_signed<S>(&mut self, bits: u32, value: S) -> io::Result<()>
+    async fn write_signed<S>(&mut self, bits: u32, value: S) -> io::Result<()>
     where
         S: SignedNumeric,
     {
-        self.counter.write_signed(bits, value)?;
+        self.counter.write_signed(bits, value).await?;
         self.records.push(WriteRecord::Signed {
             bits,
             value: value.signed_value(),
@@ -898,21 +971,21 @@ where
     }
 
     #[inline]
-    fn write_unary0(&mut self, value: u32) -> io::Result<()> {
+    async fn write_unary0(&mut self, value: u32) -> io::Result<()> {
         self.records.push(WriteRecord::Unary0(value));
-        self.counter.write_unary0(value)
+        self.counter.write_unary0(value).await
     }
 
     #[inline]
-    fn write_unary1(&mut self, value: u32) -> io::Result<()> {
+    async fn write_unary1(&mut self, value: u32) -> io::Result<()> {
         self.records.push(WriteRecord::Unary1(value));
-        self.counter.write_unary1(value)
+        self.counter.write_unary1(value).await
     }
 
     #[inline]
-    fn write_bytes(&mut self, buf: &[u8]) -> io::Result<()> {
+    async fn write_bytes(&mut self, buf: &[u8]) -> io::Result<()> {
         self.records.push(WriteRecord::Bytes(buf.into()));
-        self.counter.write_bytes(buf)
+        self.counter.write_bytes(buf).await
     }
 
     #[inline]
@@ -921,39 +994,42 @@ where
     }
 }
 
-impl<N, E> HuffmanWrite<E> for BitRecorder<N, E>
+#[async_trait]
+impl<N, E> AsyncHuffmanWrite<E> for BitRecorder<N, E>
 where
-    E: Endianness,
-    N: Copy + From<u32> + AddAssign + Rem<Output = N> + Eq,
+    E: AsyncEndianness,
+    N: Copy + From<u32> + AddAssign + Rem<Output = N> + Eq + Sync + Send,
 {
     #[inline]
-    fn write_huffman<T>(&mut self, tree: &WriteHuffmanTree<E, T>, symbol: T) -> io::Result<()>
+    async fn write_huffman<T>(&mut self, tree: &WriteHuffmanTree<E, T>, symbol: T) -> io::Result<()>
     where
-        T: Ord + Copy,
+        T: Ord + Copy + Sync + Send,
     {
-        tree.get(&symbol)
-            .try_for_each(|(bits, value)| self.write(*bits, *value))
+        for (bits, value) in tree.get(&symbol) {
+            self.write(*bits, *value).await?;
+        }
+        Ok(())
     }
 }
 
 #[inline]
-fn write_byte<W>(mut writer: W, byte: u8) -> io::Result<()>
+async fn write_byte<W>(mut writer: W, byte: u8) -> io::Result<()>
 where
-    W: io::Write,
+    W: AsyncWrite + Unpin + Sync + Send,
 {
     let buf = [byte];
-    writer.write_all(&buf)
+    writer.write_all(&buf).await
 }
 
-fn write_unaligned<W, E, N>(
+async fn write_unaligned<W, E, N>(
     writer: W,
     acc: &mut BitQueue<E, N>,
     rem: &mut BitQueue<E, u8>,
 ) -> io::Result<()>
 where
-    W: io::Write,
-    E: Endianness,
-    N: Numeric,
+    W: AsyncWrite + Unpin + Sync + Send,
+    E: AsyncEndianness + Sync + Send,
+    N: Numeric + Sync + Send,
 {
     if rem.is_empty() {
         Ok(())
@@ -962,18 +1038,18 @@ where
         let bits_to_transfer = min(8 - rem.len(), acc.len());
         rem.push(bits_to_transfer, acc.pop(bits_to_transfer).to_u8());
         if rem.len() == 8 {
-            write_byte(writer, rem.pop(8))
+            write_byte(writer, rem.pop(8)).await
         } else {
             Ok(())
         }
     }
 }
 
-fn write_aligned<W, E, N>(mut writer: W, acc: &mut BitQueue<E, N>) -> io::Result<()>
+async fn write_aligned<W, E, N>(mut writer: W, acc: &mut BitQueue<E, N>) -> io::Result<()>
 where
-    W: io::Write,
-    E: Endianness,
-    N: Numeric,
+    W: AsyncWrite + Unpin + Sync + Send,
+    E: AsyncEndianness + Sync + Send,
+    N: Numeric + Sync + Send,
 {
     let to_write = (acc.len() / 8) as usize;
     if to_write > 0 {
@@ -982,7 +1058,7 @@ where
         for b in buf_ref[0..to_write].iter_mut() {
             *b = acc.pop(8).to_u8();
         }
-        writer.write_all(&buf_ref[0..to_write])
+        writer.write_all(&buf_ref[0..to_write]).await
     } else {
         Ok(())
     }
@@ -991,24 +1067,24 @@ where
 /// For writing aligned bytes to a stream of bytes in a given endianness.
 ///
 /// This only writes aligned values and maintains no internal state.
-pub struct ByteWriter<W: io::Write, E: Endianness> {
+pub struct AsyncByteWriter<W: AsyncWrite, E: AsyncEndianness> {
     phantom: PhantomData<E>,
     writer: W,
 }
 
-impl<W: io::Write, E: Endianness> ByteWriter<W, E> {
-    /// Wraps a ByteWriter around something that implements `Write`
-    pub fn new(writer: W) -> ByteWriter<W, E> {
-        ByteWriter {
+impl<W: AsyncWrite + Unpin + Sync + Send, E: AsyncEndianness + Sync + Send> AsyncByteWriter<W, E> {
+    /// Wraps an AsyncBitWriter around something that implements `AsyncWrite`
+    pub fn new(writer: W) -> AsyncByteWriter<W, E> {
+        AsyncByteWriter {
             phantom: PhantomData,
             writer,
         }
     }
 
-    /// Wraps a BitWriter around something that implements `Write`
+    /// Wraps an AsyncBitWriter around something that implements `AsyncWrite`
     /// with the given endianness.
-    pub fn endian(writer: W, _endian: E) -> ByteWriter<W, E> {
-        ByteWriter {
+    pub fn endian(writer: W, _endian: E) -> AsyncByteWriter<W, E> {
+        AsyncByteWriter {
             phantom: PhantomData,
             writer,
         }
@@ -1029,8 +1105,8 @@ impl<W: io::Write, E: Endianness> ByteWriter<W, E> {
 
     /// Converts `ByteWriter` to `BitWriter` in the same endianness.
     #[inline]
-    pub fn into_bitwriter(self) -> BitWriter<W, E> {
-        BitWriter::new(self.into_writer())
+    pub fn into_bitwriter(self) -> AsyncBitWriter<W, E> {
+        AsyncBitWriter::new(self.into_writer())
     }
 
     /// Provides temporary `BitWriter` in the same endianness.
@@ -1039,13 +1115,14 @@ impl<W: io::Write, E: Endianness> ByteWriter<W, E> {
     ///
     /// Any unwritten bits left over when `BitWriter` is dropped are lost.
     #[inline]
-    pub fn bitwriter(&mut self) -> BitWriter<&mut W, E> {
-        BitWriter::new(self.writer())
+    pub fn bitwriter(&mut self) -> AsyncBitWriter<&mut W, E> {
+        AsyncBitWriter::new(self.writer())
     }
 }
 
 /// A trait for anything that can write aligned values to an output stream
-pub trait ByteWrite {
+#[async_trait]
+pub trait AsyncByteWrite {
     /// Writes whole numeric value to stream
     ///
     /// # Errors
@@ -1053,38 +1130,43 @@ pub trait ByteWrite {
     /// Passes along any I/O error from the underlying stream.
     /// # Examples
     /// ```
-    /// use std::io::Write;
-    /// use bitstream_io::{BigEndian, ByteWriter, ByteWrite};
-    /// let mut writer = ByteWriter::endian(Vec::new(), BigEndian);
-    /// writer.write(0b0000000011111111u16).unwrap();
+    /// use tokio::io::AsyncWrite;
+    /// use bitstream_io::{BigEndian, AsyncBitWriter, AsyncBitWrite};
+    /// # tokio_test::block_on(async {
+    /// let mut writer = AsyncBitWriter::endian(Vec::new(), BigEndian);
+    /// writer.write(16, 0b0000000011111111u16).await.unwrap();
     /// assert_eq!(writer.into_writer(), [0b00000000, 0b11111111]);
+    /// # });
     /// ```
     ///
     /// ```
-    /// use std::io::Write;
-    /// use bitstream_io::{LittleEndian, ByteWriter, ByteWrite};
-    /// let mut writer = ByteWriter::endian(Vec::new(), LittleEndian);
-    /// writer.write(0b0000000011111111u16).unwrap();
+    /// use tokio::io::AsyncWrite;
+    /// use bitstream_io::{LittleEndian, AsyncBitWriter, AsyncBitWrite};
+    /// # tokio_test::block_on(async {
+    /// let mut writer = AsyncBitWriter::endian(Vec::new(), LittleEndian);
+    /// writer.write(16, 0b0000000011111111u16).await.unwrap();
     /// assert_eq!(writer.into_writer(), [0b11111111, 0b00000000]);
+    /// # });
     /// ```
-    fn write<N: Numeric>(&mut self, value: N) -> io::Result<()>;
+    async fn write<N: Numeric>(&mut self, value: N) -> io::Result<()>;
 
     /// Writes the entirety of a byte buffer to the stream.
     ///
     /// # Errors
     ///
     /// Passes along any I/O error from the underlying stream.
-    fn write_bytes(&mut self, buf: &[u8]) -> io::Result<()>;
+    async fn write_bytes(&mut self, buf: &[u8]) -> io::Result<()>;
 }
 
-impl<W: io::Write, E: Endianness> ByteWrite for ByteWriter<W, E> {
+#[async_trait]
+impl<W: AsyncWrite + Unpin + Sync + Send, E: AsyncEndianness + Sync + Send> AsyncByteWrite for AsyncByteWriter<W, E> {
     #[inline]
-    fn write<N: Numeric>(&mut self, value: N) -> io::Result<()> {
-        E::write_numeric(&mut self.writer, value)
+    async fn write<N: Numeric>(&mut self, value: N) -> io::Result<()> {
+        E::write_numeric(&mut self.writer, value).await
     }
 
     #[inline]
-    fn write_bytes(&mut self, buf: &[u8]) -> io::Result<()> {
-        self.writer.write_all(buf)
+    async fn write_bytes(&mut self, buf: &[u8]) -> io::Result<()> {
+        self.writer.write_all(buf).await
     }
 }

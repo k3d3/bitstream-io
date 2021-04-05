@@ -3,11 +3,17 @@ name = "bitstream-io"
 description = "Library for reading/writing un-aligned values from/to streams in big-endian and little-endian formats."
 keywords = ["bitstream", "endian", "big-endian", "little-endian", "binary"]
 version = "1.0.0"
-authors = ["Brian Langenberger <bjl@usa.net>"]
+authors = ["Brian Langenberger <bjl@usa.net>", "k3d3"]
 license = "MIT/Apache-2.0"
 documentation = "https://docs.rs/bitstream-io/"
-homepage = "https://github.com/tuffy/bitstream-io"
-repository = "https://github.com/tuffy/bitstream-io"
+homepage = "https://github.com/k3d3/bitstream-io"
+repository = "https://github.com/k3d3/bitstream-io"
 edition = "2018"
 
 [dependencies]
+async-trait = "0.1.48"
+tokio = { version = "1.4.0", features = ["io-util"] }
+
+[dev-dependencies]
+tokio = { version = "1.4.0", features = ["io-util", "rt", "macros"] }
+tokio-test = "0.4.1"

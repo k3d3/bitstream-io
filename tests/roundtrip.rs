@@ -7,29 +7,29 @@
 // except according to those terms.
 
 extern crate bitstream_io;
-use bitstream_io::{BigEndian, BitRead, BitReader, BitWrite, BitWriter, LittleEndian};
+use bitstream_io::{BigEndian, AsyncBitRead, AsyncBitReader, AsyncBitWrite, AsyncBitWriter, LittleEndian};
 use std::io::Cursor;
 
 macro_rules! define_roundtrip {
     ($func_name:ident, $endianness:ident) => {
-        #[test]
-        fn $func_name() {
+        #[tokio::test]
+        async fn $func_name() {
             /*unsigned values*/
             for bits in 1..17 {
                 let max = 1 << bits;
                 let mut output: Vec<u8> = Vec::with_capacity(max);
                 {
-                    let mut writer = BitWriter::endian(&mut output, $endianness);
+                    let mut writer = AsyncBitWriter::endian(&mut output, $endianness);
                     for value in 0..max {
-                        writer.write(bits, value as u32).unwrap();
+                        writer.write(bits, value as u32).await.unwrap();
                     }
-                    writer.byte_align().unwrap();
+                    writer.byte_align().await.unwrap();
                 }
                 {
                     let mut c = Cursor::new(&output);
-                    let mut reader = BitReader::endian(&mut c, $endianness);
+                    let mut reader = AsyncBitReader::endian(&mut c, $endianness);
                     for value in 0..max {
-                        assert_eq!(reader.read::<u32>(bits).unwrap(), value as u32);
+                        assert_eq!(reader.read::<u32>(bits).await.unwrap(), value as u32);
                     }
                 }
             }
@@ -40,17 +40,17 @@ macro_rules! define_roundtrip {
                 let max = 1i32 << (bits - 1);
                 let mut output: Vec<u8> = Vec::with_capacity(max as usize);
                 {
-                    let mut writer = BitWriter::endian(&mut output, $endianness);
+                    let mut writer = AsyncBitWriter::endian(&mut output, $endianness);
                     for value in min..max {
-                        writer.write_signed(bits, value as i32).unwrap();
+                        writer.write_signed(bits, value as i32).await.unwrap();
                     }
-                    writer.byte_align().unwrap();
+                    writer.byte_align().await.unwrap();
                 }
                 {
                     let mut c = Cursor::new(&output);
-                    let mut reader = BitReader::endian(&mut c, $endianness);
+                    let mut reader = AsyncBitReader::endian(&mut c, $endianness);
                     for value in min..max {
-                        assert_eq!(reader.read_signed::<i32>(bits).unwrap(), value as i32);
+                        assert_eq!(reader.read_signed::<i32>(bits).await.unwrap(), value as i32);
                     }
                 }
             }
@@ -63,37 +63,37 @@ define_roundtrip!(test_roundtrip_le, LittleEndian);
 
 macro_rules! define_unary_roundtrip {
     ($func_name:ident, $endianness:ident) => {
-        #[test]
-        fn $func_name() {
+        #[tokio::test]
+        async fn $func_name() {
             let mut output: Vec<u8> = Vec::new();
             {
-                let mut writer = BitWriter::endian(&mut output, $endianness);
+                let mut writer = AsyncBitWriter::endian(&mut output, $endianness);
                 for value in 0..1024 {
-                    writer.write_unary0(value).unwrap();
+                    writer.write_unary0(value).await.unwrap();
                 }
-                writer.byte_align().unwrap();
+                writer.byte_align().await.unwrap();
             }
             {
                 let mut c = Cursor::new(&output);
-                let mut reader = BitReader::endian(&mut c, $endianness);
+                let mut reader = AsyncBitReader::endian(&mut c, $endianness);
                 for value in 0..1024 {
-                    assert_eq!(reader.read_unary0().unwrap(), value);
+                    assert_eq!(reader.read_unary0().await.unwrap(), value);
                 }
             }
 
             let mut output: Vec<u8> = Vec::new();
             {
-                let mut writer = BitWriter::endian(&mut output, $endianness);
+                let mut writer = AsyncBitWriter::endian(&mut output, $endianness);
                 for value in 0..1024 {
-                    writer.write_unary1(value).unwrap();
+                    writer.write_unary1(value).await.unwrap();
                 }
-                writer.byte_align().unwrap();
+                writer.byte_align().await.unwrap();
             }
             {
                 let mut c = Cursor::new(&output);
-                let mut reader = BitReader::endian(&mut c, $endianness);
+                let mut reader = AsyncBitReader::endian(&mut c, $endianness);
                 for value in 0..1024 {
-                    assert_eq!(reader.read_unary1().unwrap(), value);
+                    assert_eq!(reader.read_unary1().await.unwrap(), value);
                 }
             }
         }

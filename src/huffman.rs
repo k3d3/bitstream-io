@@ -12,7 +12,7 @@
 #![warn(missing_docs)]
 
 use super::BitQueue;
-use super::Endianness;
+use super::AsyncEndianness;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::marker::PhantomData;
@@ -27,7 +27,7 @@ use std::marker::PhantomData;
 /// in the compiled tree.  If symbols require a nontrivial amount of space,
 /// consider using reference counting so that they may be cloned
 /// more efficiently.
-pub enum ReadHuffmanTree<E: Endianness, T: Clone> {
+pub enum ReadHuffmanTree<E: AsyncEndianness, T: Clone> {
     /// The final value and new reader state
     Done(T, u8, u32, PhantomData<E>),
     /// Another byte is necessary to determine final value
@@ -57,26 +57,28 @@ pub enum ReadHuffmanTree<E: Endianness, T: Clone> {
 /// ```
 ///
 /// ```
-/// use std::io::{Read, Cursor};
-/// use bitstream_io::{BigEndian, BitReader, HuffmanRead};
+/// use std::io::Cursor;
+/// use bitstream_io::{BigEndian, AsyncBitReader, AsyncHuffmanRead};
 /// use bitstream_io::huffman::compile_read_tree;
 /// let tree = compile_read_tree(
 ///     vec![('a', vec![0]),
 ///          ('b', vec![1, 0]),
 ///          ('c', vec![1, 1, 0]),
 ///          ('d', vec![1, 1, 1])]).unwrap();
+/// # tokio_test::block_on(async {
 /// let data = [0b10110111];
 /// let mut cursor = Cursor::new(&data);
-/// let mut reader = BitReader::endian(&mut cursor, BigEndian);
-/// assert_eq!(reader.read_huffman(&tree).unwrap(), 'b');
-/// assert_eq!(reader.read_huffman(&tree).unwrap(), 'c');
-/// assert_eq!(reader.read_huffman(&tree).unwrap(), 'd');
+/// let mut reader = AsyncBitReader::endian(&mut cursor, BigEndian);
+/// assert_eq!(reader.read_huffman(&tree).await.unwrap(), 'b');
+/// assert_eq!(reader.read_huffman(&tree).await.unwrap(), 'c');
+/// assert_eq!(reader.read_huffman(&tree).await.unwrap(), 'd');
+/// # });
 /// ```
 pub fn compile_read_tree<E, T>(
     values: Vec<(T, Vec<u8>)>,
 ) -> Result<Box<[ReadHuffmanTree<E, T>]>, HuffmanTreeError>
 where
-    E: Endianness,
+    E: AsyncEndianness,
     T: Clone,
 {
     let tree = FinalHuffmanTree::new(values)?;
@@ -102,7 +104,7 @@ fn compile_queue<E, T>(
     tree: &FinalHuffmanTree<T>,
 ) -> ReadHuffmanTree<E, T>
 where
-    E: Endianness,
+    E: AsyncEndianness,
     T: Clone,
 {
     match tree {
@@ -257,28 +259,29 @@ impl fmt::Display for HuffmanTreeError {
 /// ```
 ///
 /// ```
-/// use std::io::Write;
-/// use bitstream_io::{BigEndian, BitWriter, HuffmanWrite};
+/// use bitstream_io::{BigEndian, AsyncBitWriter, AsyncHuffmanWrite};
 /// use bitstream_io::huffman::compile_write_tree;
 /// let tree = compile_write_tree(
 ///     vec![('a', vec![0]),
 ///          ('b', vec![1, 0]),
 ///          ('c', vec![1, 1, 0]),
 ///          ('d', vec![1, 1, 1])]).unwrap();
+/// # tokio_test::block_on(async {
 /// let mut data = Vec::new();
 /// {
-///     let mut writer = BitWriter::endian(&mut data, BigEndian);
-///     writer.write_huffman(&tree, 'b').unwrap();
-///     writer.write_huffman(&tree, 'c').unwrap();
-///     writer.write_huffman(&tree, 'd').unwrap();
+///     let mut writer = AsyncBitWriter::endian(&mut data, BigEndian);
+///     writer.write_huffman(&tree, 'b').await.unwrap();
+///     writer.write_huffman(&tree, 'c').await.unwrap();
+///     writer.write_huffman(&tree, 'd').await.unwrap();
 /// }
 /// assert_eq!(data, [0b10110111]);
+/// # });
 /// ```
 pub fn compile_write_tree<E, T>(
     values: Vec<(T, Vec<u8>)>,
 ) -> Result<WriteHuffmanTree<E, T>, HuffmanTreeError>
 where
-    E: Endianness,
+    E: AsyncEndianness,
     T: Ord + Clone,
 {
     let mut map = BTreeMap::new();
@@ -309,12 +312,12 @@ where
 
 /// A compiled Huffman tree for use with the `write_huffman` method.
 /// Returned by `compiled_write_tree`.
-pub struct WriteHuffmanTree<E: Endianness, T: Ord> {
+pub struct WriteHuffmanTree<E: AsyncEndianness, T: Ord> {
     map: BTreeMap<T, Box<[(u32, u32)]>>,
     phantom: PhantomData<E>,
 }
 
-impl<E: Endianness, T: Ord + Clone> WriteHuffmanTree<E, T> {
+impl<E: AsyncEndianness, T: Ord + Clone> WriteHuffmanTree<E, T> {
     /// Returns true if symbol is in tree.
     #[inline]
     pub fn has_symbol(&self, symbol: &T) -> bool {

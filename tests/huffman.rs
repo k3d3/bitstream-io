@@ -1,8 +1,8 @@
 extern crate bitstream_io;
 use bitstream_io::huffman::{compile_read_tree, compile_write_tree, HuffmanTreeError};
 
-#[test]
-fn test_huffman_errors() {
+#[tokio::test]
+async fn test_huffman_errors() {
     use bitstream_io::BE;
 
     let empty: Vec<(i32, Vec<u8>)> = Vec::new();
@@ -59,52 +59,52 @@ fn test_huffman_errors() {
     );
 }
 
-#[test]
-fn test_huffman_values() {
+#[tokio::test]
+async fn test_huffman_values() {
     use bitstream_io::huffman::compile_read_tree;
-    use bitstream_io::{BigEndian, BitReader, HuffmanRead};
+    use bitstream_io::{BigEndian, AsyncBitReader, AsyncHuffmanRead};
     use std::io::Cursor;
     use std::ops::Deref;
-    use std::rc::Rc;
+    use std::sync::Arc;
 
     let data = [0xB1, 0xED];
 
     // we can lookup values that aren't just integers also
     let tree = compile_read_tree(vec![
-        (Some(0), vec![0]),
+        (Some(0u64), vec![0]),
         (Some(1), vec![1, 0]),
         (Some(2), vec![1, 1, 0]),
         (None, vec![1, 1, 1]),
     ])
     .unwrap();
-    let mut r = BitReader::endian(Cursor::new(&data), BigEndian);
-    assert_eq!(r.read_huffman(&tree).unwrap(), Some(1));
-    assert_eq!(r.read_huffman(&tree).unwrap(), Some(2));
-    assert_eq!(r.read_huffman(&tree).unwrap(), Some(0));
-    assert_eq!(r.read_huffman(&tree).unwrap(), Some(0));
-    assert_eq!(r.read_huffman(&tree).unwrap(), None);
+    let mut r = AsyncBitReader::endian(Cursor::new(&data), BigEndian);
+    assert_eq!(r.read_huffman(&tree).await.unwrap(), Some(1));
+    assert_eq!(r.read_huffman(&tree).await.unwrap(), Some(2));
+    assert_eq!(r.read_huffman(&tree).await.unwrap(), Some(0));
+    assert_eq!(r.read_huffman(&tree).await.unwrap(), Some(0));
+    assert_eq!(r.read_huffman(&tree).await.unwrap(), None);
 
     // we can even lookup potentially large values,
     // preferably using Rc to avoid making copies of each one
     let tree = compile_read_tree(vec![
-        (Rc::new("foo".to_owned()), vec![0]),
-        (Rc::new("bar".to_owned()), vec![1, 0]),
-        (Rc::new("baz".to_owned()), vec![1, 1, 0]),
-        (Rc::new("kelp".to_owned()), vec![1, 1, 1]),
+        (Arc::new("foo".to_owned()), vec![0]),
+        (Arc::new("bar".to_owned()), vec![1, 0]),
+        (Arc::new("baz".to_owned()), vec![1, 1, 0]),
+        (Arc::new("kelp".to_owned()), vec![1, 1, 1]),
     ])
     .unwrap();
-    let mut r = BitReader::endian(Cursor::new(&data), BigEndian);
-    assert_eq!(r.read_huffman(&tree).unwrap().deref(), "bar");
-    assert_eq!(r.read_huffman(&tree).unwrap().deref(), "baz");
-    assert_eq!(r.read_huffman(&tree).unwrap().deref(), "foo");
-    assert_eq!(r.read_huffman(&tree).unwrap().deref(), "foo");
-    assert_eq!(r.read_huffman(&tree).unwrap().deref(), "kelp");
+    let mut r = AsyncBitReader::endian(Cursor::new(&data), BigEndian);
+    assert_eq!(r.read_huffman(&tree).await.unwrap().deref(), "bar");
+    assert_eq!(r.read_huffman(&tree).await.unwrap().deref(), "baz");
+    assert_eq!(r.read_huffman(&tree).await.unwrap().deref(), "foo");
+    assert_eq!(r.read_huffman(&tree).await.unwrap().deref(), "foo");
+    assert_eq!(r.read_huffman(&tree).await.unwrap().deref(), "kelp");
 }
 
-#[test]
-fn test_lengthy_huffman_values() {
+#[tokio::test]
+async fn test_lengthy_huffman_values() {
     use bitstream_io::huffman::{compile_read_tree, compile_write_tree};
-    use bitstream_io::{BitReader, BitWrite, BitWriter, HuffmanRead, HuffmanWrite, BE, LE};
+    use bitstream_io::{AsyncBitReader, AsyncBitWrite, AsyncBitWriter, AsyncHuffmanRead, AsyncHuffmanWrite, BE, LE};
     use std::io::Cursor;
 
     let max_bits = 70;
@@ -131,26 +131,26 @@ fn test_lengthy_huffman_values() {
     let mut data_be = Vec::new();
     let mut data_le = Vec::new();
     {
-        let mut writer_be = BitWriter::new(&mut data_be);
-        let mut writer_le = BitWriter::new(&mut data_le);
-        for _ in 0..20 {
+        let mut writer_be = AsyncBitWriter::new(&mut data_be);
+        let mut writer_le = AsyncBitWriter::new(&mut data_le);
+        for _ in 0u64..20 {
             for bits in 0..max_bits {
-                writer_be.write_huffman(&write_tree_be, Some(bits)).unwrap();
-                writer_le.write_huffman(&write_tree_le, Some(bits)).unwrap();
+                writer_be.write_huffman(&write_tree_be, Some(bits)).await.unwrap();
+                writer_le.write_huffman(&write_tree_le, Some(bits)).await.unwrap();
             }
         }
-        writer_be.byte_align().unwrap();
-        writer_le.byte_align().unwrap();
+        writer_be.byte_align().await.unwrap();
+        writer_le.byte_align().await.unwrap();
     }
     {
         let mut cursor_be = Cursor::new(&data_be);
         let mut cursor_le = Cursor::new(&data_le);
-        let mut reader_be = BitReader::new(&mut cursor_be);
-        let mut reader_le = BitReader::new(&mut cursor_le);
+        let mut reader_be = AsyncBitReader::new(&mut cursor_be);
+        let mut reader_le = AsyncBitReader::new(&mut cursor_le);
         for _ in 0..20 {
             for bits in 0..max_bits {
-                assert_eq!(reader_be.read_huffman(&read_tree_be).unwrap(), Some(bits));
-                assert_eq!(reader_le.read_huffman(&read_tree_le).unwrap(), Some(bits));
+                assert_eq!(reader_be.read_huffman(&read_tree_be).await.unwrap(), Some(bits));
+                assert_eq!(reader_le.read_huffman(&read_tree_le).await.unwrap(), Some(bits));
             }
         }
     }

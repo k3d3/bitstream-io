@@ -16,8 +16,8 @@
 //! Both big-endian and little-endian streams are supported.
 //!
 //! The only requirement for wrapped reader streams is that they must
-//! implement the `Read` trait, and the only requirement
-//! for writer streams is that they must implement the `Write` trait.
+//! implement the `AsyncRead` trait, and the only requirement
+//! for writer streams is that they must implement the `AsyncWrite` trait.
 //!
 //! In addition, reader streams do not consume any more bytes
 //! from the underlying reader than necessary, buffering only a
@@ -30,9 +30,9 @@
 
 //! # Migrating From Pre 1.0.0
 //!
-//! There are now `BitRead` and `BitWrite` traits for bitstream
+//! There are now `AsyncBitRead` and `AsyncBitWrite` traits for bitstream
 //! reading and writing (analogous to the standard library's
-//! `Read` and `Write` traits) which you will also need to import.
+//! `AsyncRead` and `AsyncWrite` traits) which you will also need to import.
 //! The upside to this approach is that library consumers
 //! can now make functions and methods generic over any sort
 //! of bit reader or bit writer, regardless of the underlying
@@ -46,13 +46,15 @@ use std::io;
 use std::marker::PhantomData;
 use std::mem;
 use std::ops::{BitOrAssign, BitXor, Not, Rem, RemAssign, Shl, ShlAssign, Shr, ShrAssign, Sub};
+use async_trait::async_trait;
 
 pub mod huffman;
 pub mod read;
 pub mod write;
-pub use read::{BitRead, BitReader, ByteRead, ByteReader, HuffmanRead};
+pub use read::{AsyncBitRead, AsyncBitReader, AsyncByteRead, AsyncByteReader, AsyncHuffmanRead};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt};
 pub use write::{
-    BitCounter, BitRecorder, BitWrite, BitWriter, ByteWrite, ByteWriter, HuffmanWrite,
+    BitCounter, BitRecorder, AsyncBitWrite, AsyncBitWriter, AsyncByteWrite, AsyncByteWriter, AsyncHuffmanWrite,
 };
 
 /// This trait extends many common integer types (both unsigned and signed)
@@ -60,6 +62,8 @@ pub use write::{
 /// with the bitstream handling traits.
 pub trait Numeric:
     Sized
+    + Sync
+    + Send
     + Copy
     + Default
     + Debug
@@ -76,7 +80,7 @@ pub trait Numeric:
     + Sub<Self, Output = Self>
 {
     /// The raw byte representation of this numeric type
-    type Bytes: AsRef<[u8]> + AsMut<[u8]>;
+    type Bytes: AsRef<[u8]> + AsMut<[u8]> + Sync + Send;
 
     /// The value of 1 in this type
     fn one() -> Self;
@@ -251,7 +255,8 @@ define_signed_numeric!(i128);
 /// (which may be shortened to `BE` and `LE`)
 /// and is not something programmers should have to implement
 /// in most cases.
-pub trait Endianness: Sized {
+#[async_trait]
+pub trait AsyncEndianness: Sized + Sync + Send {
     /// Pushes the given bits and value onto an accumulator
     /// with the given bits and value.
     fn push<N>(queue: &mut BitQueue<Self, N>, bits: u32, value: N)
@@ -283,28 +288,28 @@ pub trait Endianness: Sized {
         N: Numeric;
 
     /// Reads signed value from reader in this endianness
-    fn read_signed<R, S>(r: &mut R, bits: u32) -> io::Result<S>
+    async fn read_signed<R, S>(r: &mut R, bits: u32) -> io::Result<S>
     where
-        R: BitRead,
+        R: AsyncBitRead,
         S: SignedNumeric;
 
     /// Writes signed value to writer in this endianness
-    fn write_signed<W, S>(w: &mut W, bits: u32, value: S) -> io::Result<()>
+    async fn write_signed<W, S>(w: &mut W, bits: u32, value: S) -> io::Result<()>
     where
-        W: BitWrite,
+        W: AsyncBitWrite,
         S: SignedNumeric;
 
     /// Reads entire numeric value from reader in this endianness
-    fn read_numeric<R, N>(r: R) -> io::Result<N>
+    async fn read_numeric<R, N>(r: R) -> io::Result<N>
     where
-        R: io::Read,
-        N: Numeric;
+        R: AsyncRead + Unpin + Sync + Send,
+        N: Numeric + Sync + Send;
 
     /// Writes entire numeric value from reader in this endianness
-    fn write_numeric<W, N>(w: W, value: N) -> io::Result<()>
+    async fn write_numeric<W, N>(w: W, value: N) -> io::Result<()>
     where
-        W: io::Write,
-        N: Numeric;
+        W: AsyncWrite + Unpin + Sync + Send,
+        N: Numeric + Sync + Send;
 }
 
 /// Big-endian, or most significant bits first
@@ -314,7 +319,8 @@ pub struct BigEndian;
 /// Big-endian, or most significant bits first
 pub type BE = BigEndian;
 
-impl Endianness for BigEndian {
+#[async_trait]
+impl AsyncEndianness for BigEndian {
     #[inline]
     fn push<N>(queue: &mut BitQueue<Self, N>, bits: u32, value: N)
     where
@@ -381,14 +387,14 @@ impl Endianness for BigEndian {
         }
     }
 
-    fn read_signed<R, S>(r: &mut R, bits: u32) -> io::Result<S>
+    async fn read_signed<R, S>(r: &mut R, bits: u32) -> io::Result<S>
     where
-        R: BitRead,
+        R: AsyncBitRead,
         S: SignedNumeric,
     {
         if bits <= S::bits_size() {
-            let is_negative = r.read_bit()?;
-            let unsigned = r.read::<S>(bits - 1)?;
+            let is_negative = r.read_bit().await?;
+            let unsigned = r.read::<S>(bits - 1).await?;
             Ok(if is_negative {
                 unsigned.as_negative(bits)
             } else {
@@ -402,9 +408,9 @@ impl Endianness for BigEndian {
         }
     }
 
-    fn write_signed<W, S>(w: &mut W, bits: u32, value: S) -> io::Result<()>
+    async fn write_signed<W, S>(w: &mut W, bits: u32, value: S) -> io::Result<()>
     where
-        W: BitWrite,
+        W: AsyncBitWrite,
         S: SignedNumeric,
     {
         if bits > S::bits_size() {
@@ -413,33 +419,34 @@ impl Endianness for BigEndian {
                 "excessive bits for type written",
             ))
         } else if bits == S::bits_size() {
-            w.write_bytes(value.to_be_bytes().as_ref())
+            w.write_bytes(value.to_be_bytes().as_ref()).await
         } else if value.is_negative() {
-            w.write_bit(true)
-                .and_then(|()| w.write(bits - 1, value.as_unsigned(bits)))
+            w.write_bit(true).await?;
+            w.write(bits - 1, value.as_unsigned(bits)).await
         } else {
-            w.write_bit(false).and_then(|()| w.write(bits - 1, value))
+            w.write_bit(false).await?;
+            w.write(bits - 1, value).await
         }
     }
 
     #[inline]
-    fn read_numeric<R, N>(mut r: R) -> io::Result<N>
+    async fn read_numeric<R, N>(mut r: R) -> io::Result<N>
     where
-        R: io::Read,
+        R: AsyncRead + Unpin + Sync + Send,
         N: Numeric,
     {
         let mut buffer = N::buffer();
-        r.read_exact(buffer.as_mut())?;
+        r.read_exact(buffer.as_mut()).await?;
         Ok(N::from_be_bytes(buffer))
     }
 
     #[inline]
-    fn write_numeric<W, N>(mut w: W, value: N) -> io::Result<()>
+    async fn write_numeric<W, N>(mut w: W, value: N) -> io::Result<()>
     where
-        W: io::Write,
+        W: AsyncWrite + Unpin + Sync + Send,
         N: Numeric,
     {
-        w.write_all(value.to_be_bytes().as_ref())
+        w.write_all(value.to_be_bytes().as_ref()).await
     }
 }
 
@@ -450,7 +457,8 @@ pub struct LittleEndian;
 /// Little-endian, or least significant bits first
 pub type LE = LittleEndian;
 
-impl Endianness for LittleEndian {
+#[async_trait]
+impl AsyncEndianness for LittleEndian {
     #[inline]
     fn push<N>(queue: &mut BitQueue<Self, N>, bits: u32, mut value: N)
     where
@@ -511,14 +519,14 @@ impl Endianness for LittleEndian {
         (queue.value ^ !N::default()).trailing_zeros()
     }
 
-    fn read_signed<R, S>(r: &mut R, bits: u32) -> io::Result<S>
+    async fn read_signed<R, S>(r: &mut R, bits: u32) -> io::Result<S>
     where
-        R: BitRead,
+        R: AsyncBitRead,
         S: SignedNumeric,
     {
         if bits <= S::bits_size() {
-            let unsigned = r.read::<S>(bits - 1)?;
-            let is_negative = r.read_bit()?;
+            let unsigned = r.read::<S>(bits - 1).await?;
+            let is_negative = r.read_bit().await?;
             Ok(if is_negative {
                 unsigned.as_negative(bits)
             } else {
@@ -532,9 +540,9 @@ impl Endianness for LittleEndian {
         }
     }
 
-    fn write_signed<W, S>(w: &mut W, bits: u32, value: S) -> io::Result<()>
+    async fn write_signed<W, S>(w: &mut W, bits: u32, value: S) -> io::Result<()>
     where
-        W: BitWrite,
+        W: AsyncBitWrite,
         S: SignedNumeric,
     {
         if bits > S::bits_size() {
@@ -543,45 +551,46 @@ impl Endianness for LittleEndian {
                 "excessive bits for type written",
             ))
         } else if bits == S::bits_size() {
-            w.write_bytes(value.to_le_bytes().as_ref())
+            w.write_bytes(value.to_le_bytes().as_ref()).await
         } else if value.is_negative() {
-            w.write(bits - 1, value.as_unsigned(bits))
-                .and_then(|()| w.write_bit(true))
+            w.write(bits - 1, value.as_unsigned(bits)).await?;
+            w.write_bit(true).await
         } else {
-            w.write(bits - 1, value).and_then(|()| w.write_bit(false))
+            w.write(bits - 1, value).await?;
+            w.write_bit(false).await
         }
     }
 
-    fn read_numeric<R, N>(mut r: R) -> io::Result<N>
+    async fn read_numeric<R, N>(mut r: R) -> io::Result<N>
     where
-        R: io::Read,
+        R: AsyncRead + Unpin + Sync + Send,
         N: Numeric,
     {
         let mut buffer = N::buffer();
-        r.read_exact(buffer.as_mut())?;
+        r.read_exact(buffer.as_mut()).await?;
         Ok(N::from_le_bytes(buffer))
     }
 
     #[inline]
-    fn write_numeric<W, N>(mut w: W, value: N) -> io::Result<()>
+    async fn write_numeric<W, N>(mut w: W, value: N) -> io::Result<()>
     where
-        W: io::Write,
+        W: AsyncWrite + Unpin + Sync + Send,
         N: Numeric,
     {
-        w.write_all(value.to_le_bytes().as_ref())
+        w.write_all(value.to_le_bytes().as_ref()).await
     }
 }
 
 /// A queue for efficiently pushing bits onto a value
 /// and popping them off a value.
 #[derive(Default)]
-pub struct BitQueue<E: Endianness, N: Numeric> {
+pub struct BitQueue<E: AsyncEndianness, N: Numeric> {
     phantom: PhantomData<E>,
     value: N,
     bits: u32,
 }
 
-impl<E: Endianness, N: Numeric> BitQueue<E, N> {
+impl<E: AsyncEndianness, N: Numeric> BitQueue<E, N> {
     /// Returns a new empty queue
     #[inline]
     pub fn new() -> BitQueue<E, N> {
@@ -731,7 +740,7 @@ impl<E: Endianness, N: Numeric> BitQueue<E, N> {
     }
 }
 
-impl<E: Endianness> BitQueue<E, u8> {
+impl<E: AsyncEndianness> BitQueue<E, u8> {
     /// Returns the state of the queue as a single value
     /// which can be used to perform lookups.
     #[inline(always)]

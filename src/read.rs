@@ -15,9 +15,11 @@
 //! [specification](https://xiph.org/flac/format.html#stream).
 //!
 //! ```
-//! use std::io::{Cursor, Read};
-//! use bitstream_io::{BigEndian, BitReader, BitRead};
+//! use std::io::Cursor;
+//! use tokio::io::{AsyncRead, AsyncReadExt};
+//! use bitstream_io::{BigEndian, AsyncBitReader, AsyncBitRead};
 //!
+//! # tokio_test::block_on(async {
 //! let flac: Vec<u8> = vec![0x66,0x4C,0x61,0x43,0x00,0x00,0x00,0x22,
 //!                          0x10,0x00,0x10,0x00,0x00,0x06,0x06,0x00,
 //!                          0x21,0x62,0x0A,0xC4,0x42,0xF0,0x00,0x04,
@@ -27,30 +29,30 @@
 //!
 //! let mut cursor = Cursor::new(&flac);
 //! {
-//!     let mut reader = BitReader::endian(&mut cursor, BigEndian);
+//!     let mut reader = AsyncBitReader::endian(&mut cursor, BigEndian);
 //!
 //!     // stream marker
 //!     let mut file_header: [u8; 4] = [0, 0, 0, 0];
-//!     reader.read_bytes(&mut file_header).unwrap();
+//!     reader.read_bytes(&mut file_header).await.unwrap();
 //!     assert_eq!(&file_header, b"fLaC");
 //!
 //!     // metadata block header
-//!     let last_block: bool = reader.read_bit().unwrap();
-//!     let block_type: u8 = reader.read(7).unwrap();
-//!     let block_size: u32 = reader.read(24).unwrap();
+//!     let last_block: bool = reader.read_bit().await.unwrap();
+//!     let block_type: u8 = reader.read(7).await.unwrap();
+//!     let block_size: u32 = reader.read(24).await.unwrap();
 //!     assert_eq!(last_block, false);
 //!     assert_eq!(block_type, 0);
 //!     assert_eq!(block_size, 34);
 //!
 //!     // STREAMINFO block
-//!     let minimum_block_size: u16 = reader.read(16).unwrap();
-//!     let maximum_block_size: u16 = reader.read(16).unwrap();
-//!     let minimum_frame_size: u32 = reader.read(24).unwrap();
-//!     let maximum_frame_size: u32 = reader.read(24).unwrap();
-//!     let sample_rate: u32 = reader.read(20).unwrap();
-//!     let channels = reader.read::<u8>(3).unwrap() + 1;
-//!     let bits_per_sample = reader.read::<u8>(5).unwrap() + 1;
-//!     let total_samples: u64 = reader.read(36).unwrap();
+//!     let minimum_block_size: u16 = reader.read(16).await.unwrap();
+//!     let maximum_block_size: u16 = reader.read(16).await.unwrap();
+//!     let minimum_frame_size: u32 = reader.read(24).await.unwrap();
+//!     let maximum_frame_size: u32 = reader.read(24).await.unwrap();
+//!     let sample_rate: u32 = reader.read(20).await.unwrap();
+//!     let channels = reader.read::<u8>(3).await.unwrap() + 1;
+//!     let bits_per_sample = reader.read::<u8>(5).await.unwrap() + 1;
+//!     let total_samples: u64 = reader.read(36).await.unwrap();
 //!     assert_eq!(minimum_block_size, 4096);
 //!     assert_eq!(maximum_block_size, 4096);
 //!     assert_eq!(minimum_frame_size, 1542);
@@ -67,27 +69,31 @@
 //! // is finished at exactly the position one would expect.
 //!
 //! let mut md5 = [0; 16];
-//! cursor.read_exact(&mut md5).unwrap();
+//! cursor.read_exact(&mut md5).await.unwrap();
 //! assert_eq!(&md5,
 //!     b"\xFA\xF2\x69\x2F\xFD\xEC\x2D\x5B\x30\x01\x76\xB4\x62\x88\x7D\x92");
+//! });
 //! ```
 
 #![warn(missing_docs)]
 
 use std::io;
+use tokio::io::{AsyncRead, AsyncReadExt};
+use async_trait::async_trait;
 
-use super::{huffman::ReadHuffmanTree, BitQueue, Endianness, Numeric, PhantomData, SignedNumeric};
+use super::{huffman::ReadHuffmanTree, BitQueue, AsyncEndianness, Numeric, PhantomData, SignedNumeric};
 
 /// A trait for anything that can read a variable number of
 /// potentially un-aligned values from an input stream
-pub trait BitRead {
+#[async_trait]
+pub trait AsyncBitRead: Sync + Send {
     /// Reads a single bit from the stream.
     /// `true` indicates 1, `false` indicates 0
     ///
     /// # Errors
     ///
     /// Passes along any I/O error from the underlying stream.
-    fn read_bit(&mut self) -> io::Result<bool>;
+    async fn read_bit(&mut self) -> io::Result<bool>;
 
     /// Reads an unsigned value from the stream with
     /// the given number of bits.
@@ -97,9 +103,9 @@ pub trait BitRead {
     /// Passes along any I/O error from the underlying stream.
     /// Also returns an error if the output type is too small
     /// to hold the requested number of bits.
-    fn read<U>(&mut self, bits: u32) -> io::Result<U>
+    async fn read<U>(&mut self, bits: u32) -> io::Result<U>
     where
-        U: Numeric;
+        U: Numeric + Sync + Send;
 
     /// Reads a twos-complement signed value from the stream with
     /// the given number of bits.
@@ -109,9 +115,9 @@ pub trait BitRead {
     /// Passes along any I/O error from the underlying stream.
     /// Also returns an error if the output type is too small
     /// to hold the requested number of bits.
-    fn read_signed<S>(&mut self, bits: u32) -> io::Result<S>
+    async fn read_signed<S>(&mut self, bits: u32) -> io::Result<S>
     where
-        S: SignedNumeric;
+        S: SignedNumeric + Sync + Send;
 
     /// Skips the given number of bits in the stream.
     /// Since this method does not need an accumulator,
@@ -125,7 +131,7 @@ pub trait BitRead {
     /// # Errors
     ///
     /// Passes along any I/O error from the underlying stream.
-    fn skip(&mut self, bits: u32) -> io::Result<()>;
+    async fn skip(&mut self, bits: u32) -> io::Result<()>;
 
     /// Completely fills the given buffer with whole bytes.
     /// If the stream is already byte-aligned, it will map
@@ -135,9 +141,9 @@ pub trait BitRead {
     /// # Errors
     ///
     /// Passes along any I/O error from the underlying stream.
-    fn read_bytes(&mut self, buf: &mut [u8]) -> io::Result<()> {
+    async fn read_bytes(&mut self, buf: &mut [u8]) -> io::Result<()> {
         for b in buf.iter_mut() {
-            *b = self.read(8)?;
+            *b = self.read(8).await?;
         }
         Ok(())
     }
@@ -150,9 +156,9 @@ pub trait BitRead {
     /// # Errors
     ///
     /// Passes along any I/O error from the underlying stream.
-    fn read_unary0(&mut self) -> io::Result<u32> {
+    async fn read_unary0(&mut self) -> io::Result<u32> {
         let mut unary = 0;
-        while self.read_bit()? {
+        while self.read_bit().await? {
             unary += 1;
         }
         Ok(unary)
@@ -166,9 +172,9 @@ pub trait BitRead {
     /// # Errors
     ///
     /// Passes along any I/O error from the underlying stream.
-    fn read_unary1(&mut self) -> io::Result<u32> {
+    async fn read_unary1(&mut self) -> io::Result<u32> {
         let mut unary = 0;
-        while !(self.read_bit()?) {
+        while !(self.read_bit().await?) {
             unary += 1;
         }
         Ok(unary)
@@ -184,16 +190,17 @@ pub trait BitRead {
 
 /// A trait for anything that can read Huffman codes
 /// of a given endianness from an input stream
-pub trait HuffmanRead<E: Endianness> {
+#[async_trait]
+pub trait AsyncHuffmanRead<E: AsyncEndianness>: Sync + Send {
     /// Given a compiled Huffman tree, reads bits from the stream
     /// until the next symbol is encountered.
     ///
     /// # Errors
     ///
     /// Passes along any I/O error from the underlying stream.
-    fn read_huffman<T>(&mut self, tree: &[ReadHuffmanTree<E, T>]) -> io::Result<T>
+    async fn read_huffman<T>(&mut self, tree: &[ReadHuffmanTree<E, T>]) -> io::Result<T>
     where
-        T: Clone;
+        T: Clone + Sync + Send;
 }
 
 /// For reading non-aligned bits from a stream of bytes in a given endianness.
@@ -201,30 +208,30 @@ pub trait HuffmanRead<E: Endianness> {
 /// This will read exactly as many whole bytes needed to return
 /// the requested number of bits.  It may cache up to a single partial byte
 /// but no more.
-pub struct BitReader<R: io::Read, E: Endianness> {
+pub struct AsyncBitReader<R: AsyncRead + Unpin, E: AsyncEndianness> {
     reader: R,
     bitqueue: BitQueue<E, u8>,
 }
 
-impl<R: io::Read, E: Endianness> BitReader<R, E> {
-    /// Wraps a BitReader around something that implements `Read`
-    pub fn new(reader: R) -> BitReader<R, E> {
-        BitReader {
+impl<R: AsyncRead + Unpin + Sync + Send, E: AsyncEndianness + Sync + Send> AsyncBitReader<R, E> {
+    /// Wraps an AsyncBitReader around something that implements `AsyncRead`
+    pub fn new(reader: R) -> AsyncBitReader<R, E> {
+        AsyncBitReader {
             reader,
             bitqueue: BitQueue::new(),
         }
     }
 
-    /// Wraps a BitReader around something that implements `Read`
+    /// Wraps an AsyncBitReader around something that implements `AsyncRead`
     /// with the given endianness.
-    pub fn endian(reader: R, _endian: E) -> BitReader<R, E> {
-        BitReader {
+    pub fn endian(reader: R, _endian: E) -> AsyncBitReader<R, E> {
+        AsyncBitReader {
             reader,
             bitqueue: BitQueue::new(),
         }
     }
 
-    /// Unwraps internal reader and disposes of BitReader.
+    /// Unwraps internal reader and disposes of AsyncBitReader.
     ///
     /// # Warning
     ///
@@ -237,7 +244,7 @@ impl<R: io::Read, E: Endianness> BitReader<R, E> {
     /// If stream is byte-aligned, provides mutable reference
     /// to internal reader.  Otherwise returns `None`
     #[inline]
-    pub fn reader(&mut self) -> Option<&mut R> {
+    pub async fn reader(&mut self) -> Option<&mut R> {
         if self.byte_aligned() {
             Some(&mut self.reader)
         } else {
@@ -245,25 +252,25 @@ impl<R: io::Read, E: Endianness> BitReader<R, E> {
         }
     }
 
-    /// Converts `BitReader` to `ByteReader` in the same endianness.
+    /// Converts `AsyncBitReader` to `AsyncByteReader` in the same endianness.
     ///
     /// # Warning
     ///
     /// Any unread partial bits are discarded.
     #[inline]
-    pub fn into_bytereader(self) -> ByteReader<R, E> {
-        ByteReader::new(self.into_reader())
+    pub fn into_bytereader(self) -> AsyncByteReader<R, E> {
+        AsyncByteReader::new(self.into_reader())
     }
 
-    /// If stream is byte-aligned, provides temporary `ByteReader`
+    /// If stream is byte-aligned, provides temporary `AsyncByteReader`
     /// in the same endianness.  Otherwise returns `None`
     ///
     /// # Warning
     ///
-    /// Any reader bits left over when `ByteReader` is dropped are lost.
+    /// Any reader bits left over when `AsyncByteReader` is dropped are lost.
     #[inline]
-    pub fn bytereader(&mut self) -> Option<ByteReader<&mut R, E>> {
-        self.reader().map(ByteReader::new)
+    pub async fn bytereader(&mut self) -> Option<AsyncByteReader<&mut R, E>> {
+        self.reader().await.map(AsyncByteReader::new)
     }
 
     /// Consumes reader and returns any un-read partial byte
@@ -271,25 +278,29 @@ impl<R: io::Read, E: Endianness> BitReader<R, E> {
     ///
     /// # Examples
     /// ```
-    /// use std::io::{Read, Cursor};
-    /// use bitstream_io::{BigEndian, BitReader, BitRead};
+    /// use std::io::Cursor;
+    /// use bitstream_io::{BigEndian, AsyncBitReader, AsyncBitRead};
+    /// # tokio_test::block_on(async {
     /// let data = [0b1010_0101, 0b0101_1010];
-    /// let mut reader = BitReader::endian(Cursor::new(&data), BigEndian);
-    /// assert_eq!(reader.read::<u16>(9).unwrap(), 0b1010_0101_0);
+    /// let mut reader = AsyncBitReader::endian(Cursor::new(&data), BigEndian);
+    /// assert_eq!(reader.read::<u16>(9).await.unwrap(), 0b1010_0101_0);
     /// let (bits, value) = reader.into_unread();
     /// assert_eq!(bits, 7);
     /// assert_eq!(value, 0b101_1010);
+    /// # });
     /// ```
     ///
     /// ```
-    /// use std::io::{Read, Cursor};
-    /// use bitstream_io::{BigEndian, BitReader, BitRead};
+    /// use std::io::Cursor;
+    /// use bitstream_io::{BigEndian, AsyncBitReader, AsyncBitRead};
+    /// # tokio_test::block_on(async {
     /// let data = [0b1010_0101, 0b0101_1010];
-    /// let mut reader = BitReader::endian(Cursor::new(&data), BigEndian);
-    /// assert_eq!(reader.read::<u16>(8).unwrap(), 0b1010_0101);
+    /// let mut reader = AsyncBitReader::endian(Cursor::new(&data), BigEndian);
+    /// assert_eq!(reader.read::<u16>(8).await.unwrap(), 0b1010_0101);
     /// let (bits, value) = reader.into_unread();
     /// assert_eq!(bits, 0);
     /// assert_eq!(value, 0);
+    /// # });
     /// ```
     #[inline]
     pub fn into_unread(self) -> (u32, u8) {
@@ -297,80 +308,91 @@ impl<R: io::Read, E: Endianness> BitReader<R, E> {
     }
 }
 
-impl<R: io::Read, E: Endianness> BitRead for BitReader<R, E> {
+#[async_trait]
+impl<R: AsyncRead + Unpin + Sync + Send, E: AsyncEndianness + Sync + Send> AsyncBitRead for AsyncBitReader<R, E> {
     /// # Examples
     ///
     /// ```
-    /// use std::io::{Read, Cursor};
-    /// use bitstream_io::{BigEndian, BitReader, BitRead};
+    /// use std::io::Cursor;
+    /// use bitstream_io::{BigEndian, AsyncBitReader, AsyncBitRead};
+    /// # tokio_test::block_on(async {
     /// let data = [0b10110111];
-    /// let mut reader = BitReader::endian(Cursor::new(&data), BigEndian);
-    /// assert_eq!(reader.read_bit().unwrap(), true);
-    /// assert_eq!(reader.read_bit().unwrap(), false);
-    /// assert_eq!(reader.read_bit().unwrap(), true);
-    /// assert_eq!(reader.read_bit().unwrap(), true);
-    /// assert_eq!(reader.read_bit().unwrap(), false);
-    /// assert_eq!(reader.read_bit().unwrap(), true);
-    /// assert_eq!(reader.read_bit().unwrap(), true);
-    /// assert_eq!(reader.read_bit().unwrap(), true);
+    /// let mut reader = AsyncBitReader::endian(Cursor::new(&data), BigEndian);
+    /// assert_eq!(reader.read_bit().await.unwrap(), true);
+    /// assert_eq!(reader.read_bit().await.unwrap(), false);
+    /// assert_eq!(reader.read_bit().await.unwrap(), true);
+    /// assert_eq!(reader.read_bit().await.unwrap(), true);
+    /// assert_eq!(reader.read_bit().await.unwrap(), false);
+    /// assert_eq!(reader.read_bit().await.unwrap(), true);
+    /// assert_eq!(reader.read_bit().await.unwrap(), true);
+    /// assert_eq!(reader.read_bit().await.unwrap(), true);
+    /// # });
     /// ```
     ///
     /// ```
-    /// use std::io::{Read, Cursor};
-    /// use bitstream_io::{LittleEndian, BitReader, BitRead};
+    /// use std::io::Cursor;
+    /// use bitstream_io::{LittleEndian, AsyncBitReader, AsyncBitRead};
+    /// # tokio_test::block_on(async {
     /// let data = [0b10110111];
-    /// let mut reader = BitReader::endian(Cursor::new(&data), LittleEndian);
-    /// assert_eq!(reader.read_bit().unwrap(), true);
-    /// assert_eq!(reader.read_bit().unwrap(), true);
-    /// assert_eq!(reader.read_bit().unwrap(), true);
-    /// assert_eq!(reader.read_bit().unwrap(), false);
-    /// assert_eq!(reader.read_bit().unwrap(), true);
-    /// assert_eq!(reader.read_bit().unwrap(), true);
-    /// assert_eq!(reader.read_bit().unwrap(), false);
-    /// assert_eq!(reader.read_bit().unwrap(), true);
+    /// let mut reader = AsyncBitReader::endian(Cursor::new(&data), LittleEndian);
+    /// assert_eq!(reader.read_bit().await.unwrap(), true);
+    /// assert_eq!(reader.read_bit().await.unwrap(), true);
+    /// assert_eq!(reader.read_bit().await.unwrap(), true);
+    /// assert_eq!(reader.read_bit().await.unwrap(), false);
+    /// assert_eq!(reader.read_bit().await.unwrap(), true);
+    /// assert_eq!(reader.read_bit().await.unwrap(), true);
+    /// assert_eq!(reader.read_bit().await.unwrap(), false);
+    /// assert_eq!(reader.read_bit().await.unwrap(), true);
+    /// # });
     /// ```
     #[inline(always)]
-    fn read_bit(&mut self) -> io::Result<bool> {
+    async fn read_bit(&mut self) -> io::Result<bool> {
         if self.bitqueue.is_empty() {
-            self.bitqueue.set(read_byte(&mut self.reader)?, 8);
+            self.bitqueue.set(read_byte(&mut self.reader).await?, 8);
         }
         Ok(self.bitqueue.pop(1) == 1)
     }
 
     /// # Examples
     /// ```
-    /// use std::io::{Read, Cursor};
-    /// use bitstream_io::{BigEndian, BitReader, BitRead};
+    /// use std::io::Cursor;
+    /// use bitstream_io::{BigEndian, AsyncBitReader, AsyncBitRead};
+    /// # tokio_test::block_on(async {
     /// let data = [0b10110111];
-    /// let mut reader = BitReader::endian(Cursor::new(&data), BigEndian);
-    /// assert_eq!(reader.read::<u8>(1).unwrap(), 0b1);
-    /// assert_eq!(reader.read::<u8>(2).unwrap(), 0b01);
-    /// assert_eq!(reader.read::<u8>(5).unwrap(), 0b10111);
+    /// let mut reader = AsyncBitReader::endian(Cursor::new(&data), BigEndian);
+    /// assert_eq!(reader.read::<u8>(1).await.unwrap(), 0b1);
+    /// assert_eq!(reader.read::<u8>(2).await.unwrap(), 0b01);
+    /// assert_eq!(reader.read::<u8>(5).await.unwrap(), 0b10111);
+    /// # });
     /// ```
     ///
     /// ```
-    /// use std::io::{Read, Cursor};
-    /// use bitstream_io::{LittleEndian, BitReader, BitRead};
+    /// use std::io::Cursor;
+    /// use bitstream_io::{LittleEndian, AsyncBitReader, AsyncBitRead};
+    /// # tokio_test::block_on(async {
     /// let data = [0b10110111];
-    /// let mut reader = BitReader::endian(Cursor::new(&data), LittleEndian);
-    /// assert_eq!(reader.read::<u8>(1).unwrap(), 0b1);
-    /// assert_eq!(reader.read::<u8>(2).unwrap(), 0b11);
-    /// assert_eq!(reader.read::<u8>(5).unwrap(), 0b10110);
+    /// let mut reader = AsyncBitReader::endian(Cursor::new(&data), LittleEndian);
+    /// assert_eq!(reader.read::<u8>(1).await.unwrap(), 0b1);
+    /// assert_eq!(reader.read::<u8>(2).await.unwrap(), 0b11);
+    /// assert_eq!(reader.read::<u8>(5).await.unwrap(), 0b10110);
+    /// # });
     /// ```
     ///
     /// ```
-    /// use std::io::{Read, Cursor};
-    /// use bitstream_io::{BigEndian, BitReader, BitRead};
+    /// use std::io::Cursor;
+    /// use bitstream_io::{BigEndian, AsyncBitReader, AsyncBitRead};
+    /// # tokio_test::block_on(async {
     /// let data = [0;10];
-    /// let mut reader = BitReader::endian(Cursor::new(&data), BigEndian);
-    /// assert!(reader.read::<u8>(9).is_err());    // can't read  9 bits to u8
-    /// assert!(reader.read::<u16>(17).is_err());  // can't read 17 bits to u16
-    /// assert!(reader.read::<u32>(33).is_err());  // can't read 33 bits to u32
-    /// assert!(reader.read::<u64>(65).is_err());  // can't read 65 bits to u64
+    /// let mut reader = AsyncBitReader::endian(Cursor::new(&data), BigEndian);
+    /// assert!(reader.read::<u8>(9).await.is_err());    // can't read  9 bits to u8
+    /// assert!(reader.read::<u16>(17).await.is_err());  // can't read 17 bits to u16
+    /// assert!(reader.read::<u32>(33).await.is_err());  // can't read 33 bits to u32
+    /// assert!(reader.read::<u64>(65).await.is_err());  // can't read 65 bits to u64
+    /// # });
     /// ```
-    fn read<U>(&mut self, mut bits: u32) -> io::Result<U>
+    async fn read<U>(&mut self, mut bits: u32) -> io::Result<U>
     where
-        U: Numeric,
+        U: Numeric + Sync + Send,
     {
         if bits <= U::bits_size() {
             let bitqueue_len = self.bitqueue.len();
@@ -381,8 +403,8 @@ impl<R: io::Read, E: Endianness> BitRead for BitReader<R, E> {
                     BitQueue::from_value(U::from_u8(self.bitqueue.pop_all()), bitqueue_len);
                 bits -= bitqueue_len;
 
-                read_aligned(&mut self.reader, bits / 8, &mut acc)?;
-                read_unaligned(&mut self.reader, bits % 8, &mut acc, &mut self.bitqueue)?;
+                read_aligned(&mut self.reader, bits / 8, &mut acc).await?;
+                read_unaligned(&mut self.reader, bits % 8, &mut acc, &mut self.bitqueue).await?;
                 Ok(acc.value())
             }
         } else {
@@ -395,60 +417,70 @@ impl<R: io::Read, E: Endianness> BitRead for BitReader<R, E> {
 
     /// # Examples
     /// ```
-    /// use std::io::{Read, Cursor};
-    /// use bitstream_io::{BigEndian, BitReader, BitRead};
+    /// use std::io::Cursor;
+    /// use bitstream_io::{BigEndian, AsyncBitReader, AsyncBitRead};
+    /// # tokio_test::block_on(async {
     /// let data = [0b10110111];
-    /// let mut reader = BitReader::endian(Cursor::new(&data), BigEndian);
-    /// assert_eq!(reader.read_signed::<i8>(4).unwrap(), -5);
-    /// assert_eq!(reader.read_signed::<i8>(4).unwrap(), 7);
+    /// let mut reader = AsyncBitReader::endian(Cursor::new(&data), BigEndian);
+    /// assert_eq!(reader.read_signed::<i8>(4).await.unwrap(), -5);
+    /// assert_eq!(reader.read_signed::<i8>(4).await.unwrap(), 7);
+    /// # })
     /// ```
     ///
     /// ```
-    /// use std::io::{Read, Cursor};
-    /// use bitstream_io::{LittleEndian, BitReader, BitRead};
+    /// use std::io::Cursor;
+    /// use bitstream_io::{LittleEndian, AsyncBitReader, AsyncBitRead};
+    /// # tokio_test::block_on(async {
     /// let data = [0b10110111];
-    /// let mut reader = BitReader::endian(Cursor::new(&data), LittleEndian);
-    /// assert_eq!(reader.read_signed::<i8>(4).unwrap(), 7);
-    /// assert_eq!(reader.read_signed::<i8>(4).unwrap(), -5);
+    /// let mut reader = AsyncBitReader::endian(Cursor::new(&data), LittleEndian);
+    /// assert_eq!(reader.read_signed::<i8>(4).await.unwrap(), 7);
+    /// assert_eq!(reader.read_signed::<i8>(4).await.unwrap(), -5);
+    /// # });
     /// ```
     ///
     /// ```
-    /// use std::io::{Read, Cursor};
-    /// use bitstream_io::{BigEndian, BitReader, BitRead};
+    /// use std::io::Cursor;
+    /// use bitstream_io::{BigEndian, AsyncBitReader, AsyncBitRead};
+    /// # tokio_test::block_on(async {
     /// let data = [0;10];
-    /// let mut r = BitReader::endian(Cursor::new(&data), BigEndian);
-    /// assert!(r.read_signed::<i8>(9).is_err());   // can't read 9 bits to i8
-    /// assert!(r.read_signed::<i16>(17).is_err()); // can't read 17 bits to i16
-    /// assert!(r.read_signed::<i32>(33).is_err()); // can't read 33 bits to i32
-    /// assert!(r.read_signed::<i64>(65).is_err()); // can't read 65 bits to i64
+    /// let mut r = AsyncBitReader::endian(Cursor::new(&data), BigEndian);
+    /// assert!(r.read_signed::<i8>(9).await.is_err());   // can't read 9 bits to i8
+    /// assert!(r.read_signed::<i16>(17).await.is_err()); // can't read 17 bits to i16
+    /// assert!(r.read_signed::<i32>(33).await.is_err()); // can't read 33 bits to i32
+    /// assert!(r.read_signed::<i64>(65).await.is_err()); // can't read 65 bits to i64
+    /// # });
     /// ```
     #[inline]
-    fn read_signed<S>(&mut self, bits: u32) -> io::Result<S>
+    async fn read_signed<S>(&mut self, bits: u32) -> io::Result<S>
     where
-        S: SignedNumeric,
+        S: SignedNumeric + Sync + Send,
     {
-        E::read_signed(self, bits)
+        E::read_signed(self, bits).await
     }
 
     /// # Examples
     /// ```
-    /// use std::io::{Read, Cursor};
-    /// use bitstream_io::{BigEndian, BitReader, BitRead};
+    /// use std::io::Cursor;
+    /// use bitstream_io::{BigEndian, AsyncBitReader, AsyncBitRead};
+    /// # tokio_test::block_on(async {
     /// let data = [0b10110111];
-    /// let mut reader = BitReader::endian(Cursor::new(&data), BigEndian);
-    /// assert!(reader.skip(3).is_ok());
-    /// assert_eq!(reader.read::<u8>(5).unwrap(), 0b10111);
+    /// let mut reader = AsyncBitReader::endian(Cursor::new(&data), BigEndian);
+    /// assert!(reader.skip(3).await.is_ok());
+    /// assert_eq!(reader.read::<u8>(5).await.unwrap(), 0b10111);
+    /// # });
     /// ```
     ///
     /// ```
-    /// use std::io::{Read, Cursor};
-    /// use bitstream_io::{LittleEndian, BitReader, BitRead};
+    /// use std::io::Cursor;
+    /// use bitstream_io::{LittleEndian, AsyncBitReader, AsyncBitRead};
+    /// # tokio_test::block_on(async {
     /// let data = [0b10110111];
-    /// let mut reader = BitReader::endian(Cursor::new(&data), LittleEndian);
-    /// assert!(reader.skip(3).is_ok());
-    /// assert_eq!(reader.read::<u8>(5).unwrap(), 0b10110);
+    /// let mut reader = AsyncBitReader::endian(Cursor::new(&data), LittleEndian);
+    /// assert!(reader.skip(3).await.is_ok());
+    /// assert_eq!(reader.read::<u8>(5).await.unwrap(), 0b10110);
+    /// # });
     /// ```
-    fn skip(&mut self, mut bits: u32) -> io::Result<()> {
+    async fn skip(&mut self, mut bits: u32) -> io::Result<()> {
         use std::cmp::min;
 
         let to_drop = min(self.bitqueue.len(), bits);
@@ -457,27 +489,29 @@ impl<R: io::Read, E: Endianness> BitRead for BitReader<R, E> {
             bits -= to_drop;
         }
 
-        skip_aligned(&mut self.reader, bits / 8)?;
-        skip_unaligned(&mut self.reader, bits % 8, &mut self.bitqueue)
+        skip_aligned(&mut self.reader, bits / 8).await?;
+        skip_unaligned(&mut self.reader, bits % 8, &mut self.bitqueue).await
     }
 
     /// # Example
     /// ```
-    /// use std::io::{Read, Cursor};
-    /// use bitstream_io::{BigEndian, BitReader, BitRead};
+    /// use std::io::Cursor;
+    /// use bitstream_io::{BigEndian, AsyncBitReader, AsyncBitRead};
+    /// # tokio_test::block_on(async {
     /// let data = b"foobar";
-    /// let mut reader = BitReader::endian(Cursor::new(data), BigEndian);
-    /// assert!(reader.skip(24).is_ok());
+    /// let mut reader = AsyncBitReader::endian(Cursor::new(data), BigEndian);
+    /// assert!(reader.skip(24).await.is_ok());
     /// let mut buf = [0;3];
-    /// assert!(reader.read_bytes(&mut buf).is_ok());
+    /// assert!(reader.read_bytes(&mut buf).await.is_ok());
     /// assert_eq!(&buf, b"bar");
+    /// # });
     /// ```
-    fn read_bytes(&mut self, buf: &mut [u8]) -> io::Result<()> {
+    async fn read_bytes(&mut self, buf: &mut [u8]) -> io::Result<()> {
         if self.byte_aligned() {
-            self.reader.read_exact(buf)
+            self.reader.read_exact(buf).await.map(|_| ())
         } else {
             for b in buf.iter_mut() {
-                *b = self.read(8)?;
+                *b = self.read(8).await?;
             }
             Ok(())
         }
@@ -485,32 +519,36 @@ impl<R: io::Read, E: Endianness> BitRead for BitReader<R, E> {
 
     /// # Examples
     /// ```
-    /// use std::io::{Read, Cursor};
-    /// use bitstream_io::{BigEndian, BitReader, BitRead};
+    /// use std::io::Cursor;
+    /// use bitstream_io::{BigEndian, AsyncBitReader, AsyncBitRead};
+    /// # tokio_test::block_on(async {
     /// let data = [0b01110111, 0b11111110];
-    /// let mut reader = BitReader::endian(Cursor::new(&data), BigEndian);
-    /// assert_eq!(reader.read_unary0().unwrap(), 0);
-    /// assert_eq!(reader.read_unary0().unwrap(), 3);
-    /// assert_eq!(reader.read_unary0().unwrap(), 10);
+    /// let mut reader = AsyncBitReader::endian(Cursor::new(&data), BigEndian);
+    /// assert_eq!(reader.read_unary0().await.unwrap(), 0);
+    /// assert_eq!(reader.read_unary0().await.unwrap(), 3);
+    /// assert_eq!(reader.read_unary0().await.unwrap(), 10);
+    /// # });
     /// ```
     ///
     /// ```
-    /// use std::io::{Read, Cursor};
-    /// use bitstream_io::{LittleEndian, BitReader, BitRead};
+    /// use std::io::Cursor;
+    /// use bitstream_io::{LittleEndian, AsyncBitReader, AsyncBitRead};
+    /// # tokio_test::block_on(async {
     /// let data = [0b11101110, 0b01111111];
-    /// let mut reader = BitReader::endian(Cursor::new(&data), LittleEndian);
-    /// assert_eq!(reader.read_unary0().unwrap(), 0);
-    /// assert_eq!(reader.read_unary0().unwrap(), 3);
-    /// assert_eq!(reader.read_unary0().unwrap(), 10);
+    /// let mut reader = AsyncBitReader::endian(Cursor::new(&data), LittleEndian);
+    /// assert_eq!(reader.read_unary0().await.unwrap(), 0);
+    /// assert_eq!(reader.read_unary0().await.unwrap(), 3);
+    /// assert_eq!(reader.read_unary0().await.unwrap(), 10);
+    /// # });
     /// ```
-    fn read_unary0(&mut self) -> io::Result<u32> {
+    async fn read_unary0(&mut self) -> io::Result<u32> {
         if self.bitqueue.is_empty() {
-            read_aligned_unary(&mut self.reader, 0b1111_1111, &mut self.bitqueue)
+            read_aligned_unary(&mut self.reader, 0b1111_1111, &mut self.bitqueue).await
                 .map(|u| u + self.bitqueue.pop_1())
         } else if self.bitqueue.all_1() {
             let base = self.bitqueue.len();
             self.bitqueue.clear();
-            read_aligned_unary(&mut self.reader, 0b1111_1111, &mut self.bitqueue)
+            read_aligned_unary(&mut self.reader, 0b1111_1111, &mut self.bitqueue).await
                 .map(|u| base + u + self.bitqueue.pop_1())
         } else {
             Ok(self.bitqueue.pop_1())
@@ -519,32 +557,36 @@ impl<R: io::Read, E: Endianness> BitRead for BitReader<R, E> {
 
     /// # Examples
     /// ```
-    /// use std::io::{Read, Cursor};
-    /// use bitstream_io::{BigEndian, BitReader, BitRead};
+    /// use std::io::Cursor;
+    /// use bitstream_io::{BigEndian, AsyncBitReader, AsyncBitRead};
+    /// # tokio_test::block_on(async {
     /// let data = [0b10001000, 0b00000001];
-    /// let mut reader = BitReader::endian(Cursor::new(&data), BigEndian);
-    /// assert_eq!(reader.read_unary1().unwrap(), 0);
-    /// assert_eq!(reader.read_unary1().unwrap(), 3);
-    /// assert_eq!(reader.read_unary1().unwrap(), 10);
+    /// let mut reader = AsyncBitReader::endian(Cursor::new(&data), BigEndian);
+    /// assert_eq!(reader.read_unary1().await.unwrap(), 0);
+    /// assert_eq!(reader.read_unary1().await.unwrap(), 3);
+    /// assert_eq!(reader.read_unary1().await.unwrap(), 10);
+    /// # });
     /// ```
     ///
     /// ```
-    /// use std::io::{Read, Cursor};
-    /// use bitstream_io::{LittleEndian, BitReader, BitRead};
+    /// use std::io::Cursor;
+    /// use bitstream_io::{LittleEndian, AsyncBitReader, AsyncBitRead};
+    /// # tokio_test::block_on(async {
     /// let data = [0b00010001, 0b10000000];
-    /// let mut reader = BitReader::endian(Cursor::new(&data), LittleEndian);
-    /// assert_eq!(reader.read_unary1().unwrap(), 0);
-    /// assert_eq!(reader.read_unary1().unwrap(), 3);
-    /// assert_eq!(reader.read_unary1().unwrap(), 10);
+    /// let mut reader = AsyncBitReader::endian(Cursor::new(&data), LittleEndian);
+    /// assert_eq!(reader.read_unary1().await.unwrap(), 0);
+    /// assert_eq!(reader.read_unary1().await.unwrap(), 3);
+    /// assert_eq!(reader.read_unary1().await.unwrap(), 10);
+    /// # });
     /// ```
-    fn read_unary1(&mut self) -> io::Result<u32> {
+    async fn read_unary1(&mut self) -> io::Result<u32> {
         if self.bitqueue.is_empty() {
-            read_aligned_unary(&mut self.reader, 0b0000_0000, &mut self.bitqueue)
+            read_aligned_unary(&mut self.reader, 0b0000_0000, &mut self.bitqueue).await
                 .map(|u| u + self.bitqueue.pop_0())
         } else if self.bitqueue.all_0() {
             let base = self.bitqueue.len();
             self.bitqueue.clear();
-            read_aligned_unary(&mut self.reader, 0b0000_0000, &mut self.bitqueue)
+            read_aligned_unary(&mut self.reader, 0b0000_0000, &mut self.bitqueue).await
                 .map(|u| base + u + self.bitqueue.pop_0())
         } else {
             Ok(self.bitqueue.pop_0())
@@ -553,15 +595,17 @@ impl<R: io::Read, E: Endianness> BitRead for BitReader<R, E> {
 
     /// # Example
     /// ```
-    /// use std::io::{Read, Cursor};
-    /// use bitstream_io::{BigEndian, BitReader, BitRead};
+    /// use std::io::Cursor;
+    /// use bitstream_io::{BigEndian, AsyncBitReader, AsyncBitRead};
+    /// # tokio_test::block_on(async {
     /// let data = [0];
-    /// let mut reader = BitReader::endian(Cursor::new(&data), BigEndian);
+    /// let mut reader = AsyncBitReader::endian(Cursor::new(&data), BigEndian);
     /// assert_eq!(reader.byte_aligned(), true);
-    /// assert!(reader.skip(1).is_ok());
+    /// assert!(reader.skip(1).await.is_ok());
     /// assert_eq!(reader.byte_aligned(), false);
-    /// assert!(reader.skip(7).is_ok());
+    /// assert!(reader.skip(7).await.is_ok());
     /// assert_eq!(reader.byte_aligned(), true);
+    /// # });
     /// ```
     #[inline]
     fn byte_aligned(&self) -> bool {
@@ -570,13 +614,15 @@ impl<R: io::Read, E: Endianness> BitRead for BitReader<R, E> {
 
     /// # Example
     /// ```
-    /// use std::io::{Read, Cursor};
-    /// use bitstream_io::{BigEndian, BitReader, BitRead};
+    /// use std::io::Cursor;
+    /// use bitstream_io::{BigEndian, AsyncBitReader, AsyncBitRead};
+    /// # tokio_test::block_on(async {
     /// let data = [0x00, 0xFF];
-    /// let mut reader = BitReader::endian(Cursor::new(&data), BigEndian);
-    /// assert_eq!(reader.read::<u8>(4).unwrap(), 0);
+    /// let mut reader = AsyncBitReader::endian(Cursor::new(&data), BigEndian);
+    /// assert_eq!(reader.read::<u8>(4).await.unwrap(), 0);
     /// reader.byte_align();
-    /// assert_eq!(reader.read::<u8>(8).unwrap(), 0xFF);
+    /// assert_eq!(reader.read::<u8>(8).await.unwrap(), 0xFF);
+    /// # });
     /// ```
     #[inline]
     fn byte_align(&mut self) {
@@ -584,26 +630,29 @@ impl<R: io::Read, E: Endianness> BitRead for BitReader<R, E> {
     }
 }
 
-impl<R: io::Read, E: Endianness> HuffmanRead<E> for BitReader<R, E> {
+#[async_trait]
+impl<R: AsyncRead + Unpin + Sync + Send, E: AsyncEndianness + Sync + Send> AsyncHuffmanRead<E> for AsyncBitReader<R, E> {
     /// # Example
     /// ```
-    /// use std::io::{Read, Cursor};
-    /// use bitstream_io::{BigEndian, BitReader, HuffmanRead};
+    /// use std::io::Cursor;
+    /// use bitstream_io::{BigEndian, AsyncBitReader, AsyncHuffmanRead};
     /// use bitstream_io::huffman::compile_read_tree;
     /// let tree = compile_read_tree(
     ///     vec![('a', vec![0]),
     ///          ('b', vec![1, 0]),
     ///          ('c', vec![1, 1, 0]),
     ///          ('d', vec![1, 1, 1])]).unwrap();
+    /// # tokio_test::block_on(async {
     /// let data = [0b10110111];
-    /// let mut reader = BitReader::endian(Cursor::new(&data), BigEndian);
-    /// assert_eq!(reader.read_huffman(&tree).unwrap(), 'b');
-    /// assert_eq!(reader.read_huffman(&tree).unwrap(), 'c');
-    /// assert_eq!(reader.read_huffman(&tree).unwrap(), 'd');
+    /// let mut reader = AsyncBitReader::endian(Cursor::new(&data), BigEndian);
+    /// assert_eq!(reader.read_huffman(&tree).await.unwrap(), 'b');
+    /// assert_eq!(reader.read_huffman(&tree).await.unwrap(), 'c');
+    /// assert_eq!(reader.read_huffman(&tree).await.unwrap(), 'd');
+    /// # });
     /// ```
-    fn read_huffman<T>(&mut self, tree: &[ReadHuffmanTree<E, T>]) -> io::Result<T>
+    async fn read_huffman<T>(&mut self, tree: &[ReadHuffmanTree<E, T>]) -> io::Result<T>
     where
-        T: Clone,
+        T: Clone + Sync + Send,
     {
         let mut result: &ReadHuffmanTree<E, T> = &tree[self.bitqueue.to_state()];
         loop {
@@ -613,7 +662,7 @@ impl<R: io::Read, E: Endianness> HuffmanRead<E> for BitReader<R, E> {
                     return Ok(value.clone());
                 }
                 ReadHuffmanTree::Continue(ref tree) => {
-                    result = &tree[read_byte(&mut self.reader)? as usize];
+                    result = &tree[read_byte(&mut self.reader).await? as usize];
                 }
                 ReadHuffmanTree::InvalidState => {
                     panic!("invalid state");
@@ -624,25 +673,25 @@ impl<R: io::Read, E: Endianness> HuffmanRead<E> for BitReader<R, E> {
 }
 
 #[inline]
-fn read_byte<R>(mut reader: R) -> io::Result<u8>
+async fn read_byte<R>(reader: &mut R) -> io::Result<u8>
 where
-    R: io::Read,
+    R: AsyncRead + Unpin + Sync + Send,
 {
     let mut buf = [0; 1];
-    reader.read_exact(&mut buf).map(|()| buf[0])
+    reader.read_exact(&mut buf).await.map(|_| buf[0])
 }
 
-fn read_aligned<R, E, N>(mut reader: R, bytes: u32, acc: &mut BitQueue<E, N>) -> io::Result<()>
+async fn read_aligned<R, E, N>(mut reader: R, bytes: u32, acc: &mut BitQueue<E, N>) -> io::Result<()>
 where
-    R: io::Read,
-    E: Endianness,
+    R: AsyncRead + Unpin + Sync + Send,
+    E: AsyncEndianness + Sync + Send,
     N: Numeric,
 {
     debug_assert!(bytes <= 16);
 
     if bytes > 0 {
         let mut buf = [0; 16];
-        reader.read_exact(&mut buf[0..bytes as usize])?;
+        reader.read_exact(&mut buf[0..bytes as usize]).await?;
         for b in &buf[0..bytes as usize] {
             acc.push(8, N::from_u8(*b));
         }
@@ -650,9 +699,9 @@ where
     Ok(())
 }
 
-fn skip_aligned<R>(mut reader: R, mut bytes: u32) -> io::Result<()>
+async fn skip_aligned<R>(mut reader: R, mut bytes: u32) -> io::Result<()>
 where
-    R: io::Read,
+    R: AsyncRead + Unpin + Sync + Send,
 {
     use std::cmp::min;
 
@@ -661,70 +710,71 @@ where
     let mut buf = [0; 8];
     while bytes > 0 {
         let to_read = min(8, bytes);
-        reader.read_exact(&mut buf[0..to_read as usize])?;
+        reader.read_exact(&mut buf[0..to_read as usize]).await?;
         bytes -= to_read;
     }
     Ok(())
 }
 
 #[inline]
-fn read_unaligned<R, E, N>(
-    reader: R,
+async fn read_unaligned<R, E, N>(
+    mut reader: R,
     bits: u32,
     acc: &mut BitQueue<E, N>,
     rem: &mut BitQueue<E, u8>,
 ) -> io::Result<()>
 where
-    R: io::Read,
-    E: Endianness,
+    R: AsyncRead + Unpin + Sync + Send,
+    E: AsyncEndianness + Sync + Send,
     N: Numeric,
 {
     debug_assert!(bits <= 8);
 
     if bits > 0 {
-        rem.set(read_byte(reader)?, 8);
+        rem.set(read_byte(&mut reader).await?, 8);
         acc.push(bits, N::from_u8(rem.pop(bits)));
     }
     Ok(())
 }
 
 #[inline]
-fn skip_unaligned<R, E>(reader: R, bits: u32, rem: &mut BitQueue<E, u8>) -> io::Result<()>
+async fn skip_unaligned<R, E>(mut reader: R, bits: u32, rem: &mut BitQueue<E, u8>) -> io::Result<()>
 where
-    R: io::Read,
-    E: Endianness,
+    R: AsyncRead + Unpin + Sync + Send,
+    E: AsyncEndianness + Sync + Send,
 {
     debug_assert!(bits <= 8);
 
     if bits > 0 {
-        rem.set(read_byte(reader)?, 8);
+        rem.set(read_byte(&mut reader).await?, 8);
         rem.pop(bits);
     }
     Ok(())
 }
 
 #[inline]
-fn read_aligned_unary<R, E>(
+async fn read_aligned_unary<R, E>(
     mut reader: R,
     continue_val: u8,
     rem: &mut BitQueue<E, u8>,
 ) -> io::Result<u32>
 where
-    R: io::Read,
-    E: Endianness,
+    R: AsyncRead + Unpin + Sync + Send,
+    E: AsyncEndianness + Sync + Send,
 {
     let mut acc = 0;
-    let mut byte = read_byte(reader.by_ref())?;
+    let mut byte = read_byte(&mut reader).await?;
     while byte == continue_val {
         acc += 8;
-        byte = read_byte(reader.by_ref())?;
+        byte = read_byte(&mut reader).await?;
     }
     rem.set(byte, 8);
     Ok(acc)
 }
 
 /// A trait for anything that can read aligned values from an input stream
-pub trait ByteRead {
+#[async_trait]
+pub trait AsyncByteRead {
     /// Reads whole numeric value from stream
     ///
     /// # Errors
@@ -733,30 +783,36 @@ pub trait ByteRead {
     ///
     /// # Examples
     /// ```
-    /// use std::io::{Read, Cursor};
-    /// use bitstream_io::{BigEndian, ByteReader, ByteRead};
+    /// use std::io::Cursor;
+    /// use tokio::io::{AsyncRead, AsyncReadExt};
+    /// use bitstream_io::{BigEndian, AsyncByteReader, AsyncByteRead};
+    /// # tokio_test::block_on(async {
     /// let data = [0b00000000, 0b11111111];
-    /// let mut reader = ByteReader::endian(Cursor::new(&data), BigEndian);
-    /// assert_eq!(reader.read::<u16>().unwrap(), 0b0000000011111111);
+    /// let mut reader = AsyncByteReader::endian(Cursor::new(&data), BigEndian);
+    /// assert_eq!(reader.read::<u16>().await.unwrap(), 0b0000000011111111);
+    /// # });
     /// ```
     ///
     /// ```
-    /// use std::io::{Read, Cursor};
-    /// use bitstream_io::{LittleEndian, ByteReader, ByteRead};
+    /// use std::io::Cursor;
+    /// use tokio::io::{AsyncRead, AsyncReadExt};
+    /// use bitstream_io::{LittleEndian, AsyncByteReader, AsyncByteRead};
+    /// # tokio_test::block_on(async {
     /// let data = [0b00000000, 0b11111111];
-    /// let mut reader = ByteReader::endian(Cursor::new(&data), LittleEndian);
-    /// assert_eq!(reader.read::<u16>().unwrap(), 0b1111111100000000);
+    /// let mut reader = AsyncByteReader::endian(Cursor::new(&data), LittleEndian);
+    /// assert_eq!(reader.read::<u16>().await.unwrap(), 0b1111111100000000);
+    /// # });
     /// ```
-    fn read<N: Numeric>(&mut self) -> Result<N, io::Error>;
+    async fn read<N: Numeric + Sync + Send>(&mut self) -> Result<N, io::Error>;
 
     /// Completely fills the given buffer with whole bytes.
     ///
     /// # Errors
     ///
     /// Passes along any I/O error from the underlying stream.
-    fn read_bytes(&mut self, buf: &mut [u8]) -> io::Result<()> {
+    async fn read_bytes(&mut self, buf: &mut [u8]) -> io::Result<()> {
         for b in buf.iter_mut() {
-            *b = self.read()?;
+            *b = self.read().await?;
         }
         Ok(())
     }
@@ -765,24 +821,24 @@ pub trait ByteRead {
 /// For reading aligned bytes from a stream of bytes in a given endianness.
 ///
 /// This only reads aligned values and maintains no internal state.
-pub struct ByteReader<R: io::Read, E: Endianness> {
+pub struct AsyncByteReader<R: AsyncRead + Unpin, E: AsyncEndianness> {
     phantom: PhantomData<E>,
     reader: R,
 }
 
-impl<R: io::Read, E: Endianness> ByteReader<R, E> {
-    /// Wraps a ByteReader around something that implements `Read`
-    pub fn new(reader: R) -> ByteReader<R, E> {
-        ByteReader {
+impl<R: AsyncRead + Unpin + Sync + Send, E: AsyncEndianness + Sync + Send> AsyncByteReader<R, E> {
+    /// Wraps an AsyncByteReader around something that implements `AsyncRead`
+    pub fn new(reader: R) -> AsyncByteReader<R, E> {
+        AsyncByteReader {
             phantom: PhantomData,
             reader,
         }
     }
 
-    /// Wraps a ByteReader around something that implements `Read`
+    /// Wraps an AsyncByteReader around something that implements `AsyncRead`
     /// with the given endianness.
-    pub fn endian(reader: R, _endian: E) -> ByteReader<R, E> {
-        ByteReader {
+    pub fn endian(reader: R, _endian: E) -> AsyncByteReader<R, E> {
+        AsyncByteReader {
             phantom: PhantomData,
             reader,
         }
@@ -802,8 +858,8 @@ impl<R: io::Read, E: Endianness> ByteReader<R, E> {
 
     /// Converts `ByteReader` to `BitReader` in the same endianness.
     #[inline]
-    pub fn into_bitreader(self) -> BitReader<R, E> {
-        BitReader::new(self.into_reader())
+    pub fn into_bitreader(self) -> AsyncBitReader<R, E> {
+        AsyncBitReader::new(self.into_reader())
     }
 
     /// Provides temporary `BitReader` in the same endianness.
@@ -812,19 +868,20 @@ impl<R: io::Read, E: Endianness> ByteReader<R, E> {
     ///
     /// Any unread bits left over when `BitReader` is dropped are lost.
     #[inline]
-    pub fn bitreader(&mut self) -> BitReader<&mut R, E> {
-        BitReader::new(self.reader())
+    pub fn bitreader(&mut self) -> AsyncBitReader<&mut R, E> {
+        AsyncBitReader::new(self.reader())
     }
 }
 
-impl<R: io::Read, E: Endianness> ByteRead for ByteReader<R, E> {
+#[async_trait]
+impl<R: AsyncRead + Unpin + Sync + Send, E: AsyncEndianness + Sync + Send> AsyncByteRead for AsyncByteReader<R, E> {
     #[inline]
-    fn read<N: Numeric>(&mut self) -> Result<N, io::Error> {
-        E::read_numeric(&mut self.reader)
+    async fn read<N: Numeric + Sync + Send>(&mut self) -> Result<N, io::Error> {
+        E::read_numeric(&mut self.reader).await
     }
 
     #[inline]
-    fn read_bytes(&mut self, buf: &mut [u8]) -> io::Result<()> {
-        self.reader.read_exact(buf)
+    async fn read_bytes(&mut self, buf: &mut [u8]) -> io::Result<()> {
+        self.reader.read_exact(buf).await.map(|_| ())
     }
 }
