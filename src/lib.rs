@@ -49,11 +49,11 @@ use std::ops::{BitOrAssign, BitXor, Not, Rem, RemAssign, Shl, ShlAssign, Shr, Sh
 use async_trait::async_trait;
 
 pub mod huffman;
-pub mod read;
-pub mod write;
-pub use read::{AsyncBitRead, AsyncBitReader, AsyncByteRead, AsyncByteReader, AsyncHuffmanRead};
+pub mod async_read;
+pub mod async_write;
+pub use async_read::{AsyncBitRead, AsyncBitReader, AsyncByteRead, AsyncByteReader, AsyncHuffmanRead};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncReadExt, AsyncWriteExt};
-pub use write::{
+pub use async_write::{
     BitCounter, BitRecorder, AsyncBitWrite, AsyncBitWriter, AsyncByteWrite, AsyncByteWriter, AsyncHuffmanWrite,
 };
 
@@ -122,7 +122,7 @@ pub trait Numeric:
     fn from_le_bytes(bytes: Self::Bytes) -> Self;
 
     /// Convert to a generic unsigned write value for stream recording purposes
-    fn unsigned_value(self) -> write::UnsignedValue;
+    fn unsigned_value(self) -> async_write::UnsignedValue;
 }
 
 macro_rules! define_numeric {
@@ -183,7 +183,7 @@ macro_rules! define_numeric {
                 <$t>::from_le_bytes(bytes)
             }
             #[inline(always)]
-            fn unsigned_value(self) -> write::UnsignedValue {
+            fn unsigned_value(self) -> async_write::UnsignedValue {
                 self.into()
             }
         }
@@ -205,7 +205,7 @@ pub trait SignedNumeric: Numeric {
     fn as_unsigned(self, bits: u32) -> Self;
 
     /// Converts to a generic signed value for stream recording purposes.
-    fn signed_value(self) -> write::SignedValue;
+    fn signed_value(self) -> async_write::SignedValue;
 }
 
 macro_rules! define_signed_numeric {
@@ -224,7 +224,7 @@ macro_rules! define_signed_numeric {
                 self - (-1 << (bits - 1))
             }
             #[inline(always)]
-            fn signed_value(self) -> write::SignedValue {
+            fn signed_value(self) -> async_write::SignedValue {
                 self.into()
             }
         }
