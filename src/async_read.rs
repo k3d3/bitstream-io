@@ -156,12 +156,17 @@ pub trait AsyncBitRead: Sync + Send {
     /// # Errors
     ///
     /// Passes along any I/O error from the underlying stream.
-    async fn read_unary0(&mut self) -> io::Result<u32> {
+    async fn read_unary0(&mut self, max_bits: Option<u32>) -> io::Result<Option<u32>> {
         let mut unary = 0;
         while self.read_bit().await? {
+            if let Some(max_bits) = max_bits {
+                if unary > max_bits {
+                    return Ok(None)
+                }
+            }
             unary += 1;
         }
-        Ok(unary)
+        Ok(Some(unary))
     }
 
     /// Counts the number of 0 bits in the stream until the next
@@ -172,12 +177,18 @@ pub trait AsyncBitRead: Sync + Send {
     /// # Errors
     ///
     /// Passes along any I/O error from the underlying stream.
-    async fn read_unary1(&mut self) -> io::Result<u32> {
+    async fn read_unary1(&mut self, max_bits: Option<u32>) -> io::Result<Option<u32>> {
         let mut unary = 0;
         while !(self.read_bit().await?) {
+            if let Some(max_bits) = max_bits {
+                if unary > max_bits {
+                    return Ok(None)
+                }
+            }
+            
             unary += 1;
         }
-        Ok(unary)
+        Ok(Some(unary))
     }
 
     /// Returns true if the stream is aligned at a whole byte.
@@ -541,17 +552,17 @@ impl<R: AsyncRead + Unpin + Sync + Send, E: AsyncEndianness + Sync + Send> Async
     /// assert_eq!(reader.read_unary0().await.unwrap(), 10);
     /// # });
     /// ```
-    async fn read_unary0(&mut self) -> io::Result<u32> {
+    async fn read_unary0(&mut self, max_bits: Option<u32>) -> io::Result<Option<u32>> {
         if self.bitqueue.is_empty() {
-            read_aligned_unary(&mut self.reader, 0b1111_1111, &mut self.bitqueue).await
-                .map(|u| u + self.bitqueue.pop_1())
+            read_aligned_unary(&mut self.reader, 0b1111_1111, &mut self.bitqueue, max_bits).await
+                .map(|u| u.map(|u2| u2 + self.bitqueue.pop_1()))
         } else if self.bitqueue.all_1() {
             let base = self.bitqueue.len();
             self.bitqueue.clear();
-            read_aligned_unary(&mut self.reader, 0b1111_1111, &mut self.bitqueue).await
-                .map(|u| base + u + self.bitqueue.pop_1())
+            read_aligned_unary(&mut self.reader, 0b1111_1111, &mut self.bitqueue, max_bits).await
+                .map(|u| u.map(|u2| base + u2 + self.bitqueue.pop_1()))
         } else {
-            Ok(self.bitqueue.pop_1())
+            Ok(Some(self.bitqueue.pop_1()))
         }
     }
 
@@ -579,17 +590,17 @@ impl<R: AsyncRead + Unpin + Sync + Send, E: AsyncEndianness + Sync + Send> Async
     /// assert_eq!(reader.read_unary1().await.unwrap(), 10);
     /// # });
     /// ```
-    async fn read_unary1(&mut self) -> io::Result<u32> {
+    async fn read_unary1(&mut self, max_bits: Option<u32>) -> io::Result<Option<u32>> {
         if self.bitqueue.is_empty() {
-            read_aligned_unary(&mut self.reader, 0b0000_0000, &mut self.bitqueue).await
-                .map(|u| u + self.bitqueue.pop_0())
+            read_aligned_unary(&mut self.reader, 0b0000_0000, &mut self.bitqueue, max_bits).await
+                .map(|u| u.map(|u2| u2 + self.bitqueue.pop_0()))
         } else if self.bitqueue.all_0() {
             let base = self.bitqueue.len();
             self.bitqueue.clear();
-            read_aligned_unary(&mut self.reader, 0b0000_0000, &mut self.bitqueue).await
-                .map(|u| base + u + self.bitqueue.pop_0())
+            read_aligned_unary(&mut self.reader, 0b0000_0000, &mut self.bitqueue, max_bits).await
+                .map(|u| u.map(|u2| base + u2 + self.bitqueue.pop_0()))
         } else {
-            Ok(self.bitqueue.pop_0())
+            Ok(Some(self.bitqueue.pop_0()))
         }
     }
 
@@ -757,7 +768,8 @@ async fn read_aligned_unary<R, E>(
     mut reader: R,
     continue_val: u8,
     rem: &mut BitQueue<E, u8>,
-) -> io::Result<u32>
+    max_bits: Option<u32>,
+) -> io::Result<Option<u32>>
 where
     R: AsyncRead + Unpin + Sync + Send,
     E: AsyncEndianness + Sync + Send,
@@ -765,11 +777,16 @@ where
     let mut acc = 0;
     let mut byte = read_byte(&mut reader).await?;
     while byte == continue_val {
+        if let Some(max_bits) = max_bits {
+            if acc > max_bits {
+                return Ok(None)
+            }
+        }
         acc += 8;
         byte = read_byte(&mut reader).await?;
     }
     rem.set(byte, 8);
-    Ok(acc)
+    Ok(Some(acc))
 }
 
 /// A trait for anything that can read aligned values from an input stream
